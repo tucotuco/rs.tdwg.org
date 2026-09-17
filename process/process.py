@@ -11,6 +11,7 @@ import os
 import shutil
 import datetime
 import copy
+import hashlib
 import pandas as pd
 
 # -----------------------
@@ -31,6 +32,40 @@ local_offset_from_utc = config['local_offset_from_utc'] # time zone used by syst
 vocab_type = config['vocab_type'] # 1 is simple vocabulary, 2 is simple controlled vocabulary, 3 is c.v. with broader hierarchy
 standardUri = config['standard'] # IRI of containing standard
 namespaces = config['namespaces'] # list of namespace-specific configuration data
+
+# Run logging. The log is written only after processing completes successfully.
+run_started = datetime.datetime.now()
+namespace_results = []
+
+def file_digest(path):
+    """Return a SHA-256 digest for a file, or None if it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as file_object:
+            for chunk in iter(lambda: file_object.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, IOError):
+        return None
+
+def snapshot_repository_files():
+    """Snapshot repository files so the run log can report files actually created or changed."""
+    repository_root = os.path.abspath('..')
+    process_logs = os.path.abspath('logs')
+    snapshot = {}
+    for root, dirs, files in os.walk(repository_root):
+        # Ignore Git internals, Python caches, and prior run logs.
+        dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__'}]
+        if os.path.abspath(root).startswith(process_logs):
+            continue
+        for filename in files:
+            path = os.path.join(root, filename)
+            digest = file_digest(path)
+            if digest is not None:
+                snapshot[path] = digest
+    return snapshot
+
+repository_snapshot_before = snapshot_repository_files()
 
 # -------------
 # Utility functions
@@ -1328,6 +1363,16 @@ for namespace in namespaces:
     else:
         print('no term changes for', namespaceUri, '- carrying forward existing current terms and versions')
 
+    namespace_results.append({
+        'prefix': pref_namespace_prefix,
+        'namespace_uri': namespaceUri,
+        'input_file': modifications_filename,
+        'new_terms': list(new_terms),
+        'modified_terms': list(modified_terms),
+        'new_term_list': new_term_list,
+        'changed': has_term_changes or new_term_list
+    })
+
     print('completed', namespaceUri, 'namespace')
 
 # -----------------------
@@ -1410,3 +1455,79 @@ decisions_links_df = pd.concat(
 )
 # Write the updated decisions-links CSV file
 decisions_links_df.to_csv('../decisions/decisions-links.csv', index=False)
+
+# -----------------------
+# Write a concise audit log for the completed processing run
+# -----------------------
+
+repository_snapshot_after = snapshot_repository_files()
+created_files = sorted(set(repository_snapshot_after) - set(repository_snapshot_before))
+modified_files = sorted(
+    path for path in set(repository_snapshot_after) & set(repository_snapshot_before)
+    if repository_snapshot_after[path] != repository_snapshot_before[path]
+)
+
+run_completed = datetime.datetime.now()
+repository_root = os.path.abspath('..')
+
+def display_path(path):
+    return os.path.relpath(path, os.getcwd())
+
+os.makedirs('logs', exist_ok=True)
+log_filename = os.path.join('logs', 'process-' + date_issued + '.log')
+
+with open(log_filename, 'w', encoding='utf-8') as log_file:
+    log_file.write('Darwin Core vocabulary processing\n')
+    log_file.write('Release date: ' + date_issued + '\n')
+    log_file.write('Started: ' + run_started.strftime('%Y-%m-%dT%H:%M:%S') + local_offset_from_utc + '\n')
+    log_file.write('Completed: ' + run_completed.strftime('%Y-%m-%dT%H:%M:%S') + local_offset_from_utc + '\n')
+    log_file.write('Status: SUCCESS\n\n')
+    log_file.write('Revision directory: ' + os.path.join('dwc-revisions', 'dwc-revisions-' + date_issued) + '/\n\n')
+
+    log_file.write('NAMESPACE SUMMARY\n\n')
+    for result in namespace_results:
+        log_file.write(result['prefix'] + ' (' + result['namespace_uri'] + ')\n')
+        log_file.write('  Input: ' + result['input_file'] + '\n')
+        log_file.write('  New terms: ' + str(len(result['new_terms'])) + '\n')
+        log_file.write('  Modified terms: ' + str(len(result['modified_terms'])) + '\n')
+        if result['new_term_list']:
+            log_file.write('  Action: processed as a new term list\n')
+        elif result['changed']:
+            log_file.write('  Action: processed term changes and version metadata\n')
+        else:
+            log_file.write('  Action: no term changes; existing current terms and versions carried forward\n')
+        if result['new_terms']:
+            log_file.write('  New term local names: ' + ', '.join(result['new_terms']) + '\n')
+        if result['modified_terms']:
+            log_file.write('  Modified term local names: ' + ', '.join(result['modified_terms']) + '\n')
+        log_file.write('\n')
+
+    log_file.write('FILES CREATED\n')
+    if created_files:
+        for path in created_files:
+            log_file.write('  ' + display_path(path) + '\n')
+    else:
+        log_file.write('  None\n')
+
+    log_file.write('\nFILES MODIFIED\n')
+    if modified_files:
+        for path in modified_files:
+            log_file.write('  ' + display_path(path) + '\n')
+    else:
+        log_file.write('  None\n')
+
+    namespaces_changed = sum(1 for result in namespace_results if result['changed'])
+    namespaces_unchanged = len(namespace_results) - namespaces_changed
+    total_new_terms = sum(len(result['new_terms']) for result in namespace_results)
+    total_modified_terms = sum(len(result['modified_terms']) for result in namespace_results)
+
+    log_file.write('\nSUMMARY\n')
+    log_file.write('  Namespaces processed: ' + str(len(namespace_results)) + '\n')
+    log_file.write('  Namespaces with changes/new term lists: ' + str(namespaces_changed) + '\n')
+    log_file.write('  Namespaces unchanged: ' + str(namespaces_unchanged) + '\n')
+    log_file.write('  New terms: ' + str(total_new_terms) + '\n')
+    log_file.write('  Modified terms: ' + str(total_modified_terms) + '\n')
+    log_file.write('  Files created: ' + str(len(created_files)) + '\n')
+    log_file.write('  Files modified: ' + str(len(modified_files)) + '\n')
+
+print('wrote processing log', log_filename)
