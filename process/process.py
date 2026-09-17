@@ -1233,7 +1233,14 @@ for namespace in namespaces:
     prepend_url = namespace['prepend_url']
     separator = namespace['separator']
     versions = database + '-versions'
-    modifications_filename = namespace['modifications_file_path']
+    # The modifications file location is derived from the release date and namespace prefix.
+    # Every configured namespace is expected to have a CSV in this directory. A header-only
+    # CSV means that the namespace participates in the release but has no term changes.
+    modifications_filename = os.path.join(
+        'dwc-revisions',
+        'dwc-revisions-' + date_issued,
+        namespace['pref_namespace_prefix'] + '.csv'
+    )
     version_namespace = namespaceUri + 'version/'
     """
     if new_term_list:
@@ -1293,29 +1300,34 @@ for namespace in namespaces:
     for term in new_terms:
         changed_terms_iris.append(namespaceUri + term)
 
-    # Step 4. Create term versions-related metadata. Generally only applies to TDWG-minted terms, not borrowed ones
-    if not borrowed and not utility_namespace:
-        generate_term_versions_metadata(database, versions, version_namespace, mods_local_name, modified_terms,local_offset_from_utc, date_issued, modifications_metadata)
+    # A namespace can participate in the vocabulary without having term changes in this release.
+    # Header-only modifications CSV files therefore mean "carry forward the existing current terms".
+    # In that case, do not mint a new term-list version, vocabulary version, or standard version
+    # merely because the namespace is present in config.yaml.
+    has_term_changes = bool(new_terms or modified_terms)
 
-    # Step 5. Generate current terms metadata
-    version_uri, aNewTermList, term_lists_versions_members, term_lists_versions_metadata, mostRecentListNumber, termlistVersionUri, term_lists_versions_replacements, term_lists_table, term_list_rowNumber = generate_current_terms_metadata(standardUri, terms_metadata, modifications_metadata, mods_local_name, modified_terms, local_offset_from_utc, date_issued, namespaceUri, termlist_uri, database, versions, term_list_label, term_list_description, pref_namespace_prefix, use_namespace_in_fragment, prepend_url, separator)
+    if has_term_changes or new_term_list:
+        # Step 4. Create term versions-related metadata. Generally only applies to TDWG-minted terms, not borrowed ones
+        if not borrowed and not utility_namespace:
+            generate_term_versions_metadata(database, versions, version_namespace, mods_local_name, modified_terms, local_offset_from_utc, date_issued, modifications_metadata)
 
-    # Step 6. Update list of termlist version members and add the termlist replacement (TDWG namespaces only)
-    if not borrowed and not utility_namespace:
-        update_termlist_version_members(aNewTermList, mostRecentListNumber, date_issued, namespaceUri, new_terms, modified_terms, version_uri, termlistVersionUri, term_lists_versions_metadata, term_lists_versions_members, term_lists_versions_replacements)
-    
-    # Step 7. Update vocabulary-related metadata
-    # NOTE: This must be within the namespace loop because the member term list information must be
-    # updated for each term list. However, the whole-vocabulary metadata will not be changed after its
-    # updated by the first namespace loop.
-    if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
-        aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri = update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri)
+        # Step 5. Generate current terms metadata
+        version_uri, aNewTermList, term_lists_versions_members, term_lists_versions_metadata, mostRecentListNumber, termlistVersionUri, term_lists_versions_replacements, term_lists_table, term_list_rowNumber = generate_current_terms_metadata(standardUri, terms_metadata, modifications_metadata, mods_local_name, modified_terms, local_offset_from_utc, date_issued, namespaceUri, termlist_uri, database, versions, term_list_label, term_list_description, pref_namespace_prefix, use_namespace_in_fragment, prepend_url, separator)
 
-    # Step 8. Update standard-related metadata
-    # NOTE: I'm think this could be left out of the loop, since it should only need to be run once as long as
-    # the script isn't being run for namespaces from more than one vocabulary. But it doesn't hurt to be in the loop, either.
-    if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
-        update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vocab_subpath, vocabularyUri, vocabularyVersionUri, aNewVocabulary)
+        # Step 6. Update list of termlist version members and add the termlist replacement (TDWG namespaces only)
+        if not borrowed and not utility_namespace:
+            update_termlist_version_members(aNewTermList, mostRecentListNumber, date_issued, namespaceUri, new_terms, modified_terms, version_uri, termlistVersionUri, term_lists_versions_metadata, term_lists_versions_members, term_lists_versions_replacements)
+
+        # Step 7. Update vocabulary-related metadata
+        if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
+            aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri = update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri)
+
+        # Step 8. Update standard-related metadata
+        if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
+            update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vocab_subpath, vocabularyUri, vocabularyVersionUri, aNewVocabulary)
+    else:
+        print('no term changes for', namespaceUri, '- carrying forward existing current terms and versions')
+
     print('completed', namespaceUri, 'namespace')
 
 # -----------------------
