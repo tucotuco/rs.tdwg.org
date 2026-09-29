@@ -1,6 +1,7 @@
 # Written by Steve Baskauf 2020-06-29 CC0
 # Updated to run as a stand-alone script 2021-07-26
 # Additional modifications to require less manual work 2023-08-27
+# additional modifications to configure the vocabularyIri rather than infer it added 2026-09-29
 
 import csv
 import json
@@ -32,6 +33,7 @@ local_offset_from_utc = config['local_offset_from_utc'] # time zone used by syst
 vocab_type = config['vocab_type'] # 1 is simple vocabulary, 2 is simple controlled vocabulary, 3 is c.v. with broader hierarchy
 standardUri = config['standard'] # IRI of containing standard
 namespaces = config['namespaces'] # list of namespace-specific configuration data
+vocabularyIri = config['vocabulary'] # IRI of containing vocabulary
 
 # Run logging. The log is written only after processing completes successfully.
 run_started = datetime.datetime.now()
@@ -752,7 +754,7 @@ def update_termlist_version_members(aNewTermList, mostRecentListNumber, date_iss
         writeCsv('../term-lists-versions/term-lists-versions-replacements.csv', term_lists_versions_replacements)
 
 # This function contains the Step 7 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
-def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri):
+def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri, vocabularyIri):
     vocabularies_table_filename = '../vocabularies/vocabularies.csv'
     vocabularies_table = readCsv(vocabularies_table_filename)
 
@@ -771,17 +773,22 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
     vocabularies_versions_replacements_filename = '../vocabularies-versions/vocabularies-versions-replacements.csv'
     vocabularies_versions_replacements = readCsv(vocabularies_versions_replacements_filename)
 
-    # find the vocabulary subpath for the updated term list
+    # Get the term-list subpath from the term-list metadata. This identifies which
+    # term-list version must be replaced within the containing vocabulary version.
     list_localName_column = findColumnWithHeader(term_lists_table[0], 'list_localName')[1]
     list_localName = term_lists_table[term_list_rowNumber][list_localName_column]
-    # the vocabulary subpath is the first part of the list local name
-    vocab_subpath = list_localName.split('/')[0]
     termList_subpath = list_localName.split('/')[1]
 
-    # generate the vocabulary URI
-    vocabularyUri = 'http://rs.tdwg.org/' + vocab_subpath + '/'
+    # The containing vocabulary is stated explicitly in config.yaml rather than
+    # inferred from the term-list IRI. This permits term lists such as eco/terms/
+    # and chrono/terms/ to belong to the Darwin Core vocabulary.
+    vocabularyUri = vocabularyIri
 
-    # generate the vocabulary version URI
+    # The vocabulary subpath is still needed when matching vocabulary versions in
+    # standard metadata, but it is derived from the configured vocabulary IRI.
+    vocab_subpath = vocabularyUri.rstrip('/').split('/')[-1]
+
+    # Generate the vocabulary version URI from the configured vocabulary.
     vocabularyVersionUri = 'http://rs.tdwg.org/version/' + vocab_subpath + '/' + date_issued
 
     # check for the case where the script was previously run to update a different term list in the same new vocabulary version
@@ -1235,7 +1242,7 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
                     pieces = standards_versions_parts[vocabularyVersionRowNumber][1].split('/')
                     versionLocalNamePiece = pieces[len(pieces)-2]
                     # check for a match of the vocabulary version local name with the vocabulary string
-                    if versionLocalNamePiece == vocabulary:
+                    if versionLocalNamePiece == vocab_subpath:
                         # change the vocabulary version on the list to the new one
                         standards_versions_parts[vocabularyVersionRowNumber][1] = vocabularyVersionUri
 
@@ -1355,7 +1362,7 @@ for namespace in namespaces:
 
         # Step 7. Update vocabulary-related metadata
         if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
-            aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri = update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri)
+            aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri = update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri, vocabularyIri)
 
         # Step 8. Update standard-related metadata
         if not utility_namespace: # utility namespaces are not part of any vocabularies or standards

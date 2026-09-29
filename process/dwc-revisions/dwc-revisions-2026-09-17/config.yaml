@@ -32,6 +32,9 @@ vocab_type: 1
 # using the date_issued value above.
 list_of_terms_iri: http://rs.tdwg.org/dwc/doc/list/
 
+# IRI of the vocabulary represented in the List of Terms document
+vocabulary = http://rs.tdwg.org/dwc/
+
 # IRI of containing standard. Existing standards IRIs:
 # Darwin Core - http://www.tdwg.org/standards/450
 # Audiovisual Core - http://www.tdwg.org/standards/638
