@@ -422,7 +422,7 @@ namespaces:
   # Note that there are extra configuration files that must be set up for term lists that are 
   # part of new vocabularies. See Section 2.1.2 for details. 
   # MUST be set to false if this is an existing term list that has been processed at some time in the past.
-  new_term_list: true
+  new_term_list: false
 
   # Normally set to false except for non-versioned namespaces like decisions.
   utility_namespace: false
