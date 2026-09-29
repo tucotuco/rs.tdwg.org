@@ -1,7 +1,6 @@
 # Written by Steve Baskauf 2020-06-29 CC0
 # Updated to run as a stand-alone script 2021-07-26
 # Additional modifications to require less manual work 2023-08-27
-# additional modifications to configure the vocabularyIri rather than infer it added 2026-09-29
 
 import csv
 import json
@@ -777,7 +776,10 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
     # term-list version must be replaced within the containing vocabulary version.
     list_localName_column = findColumnWithHeader(term_lists_table[0], 'list_localName')[1]
     list_localName = term_lists_table[term_list_rowNumber][list_localName_column]
-    termList_subpath = list_localName.split('/')[1]
+    # Preserve the complete term-list identity (for example, "dwc/terms",
+    # "eco/terms", or "chrono/iri"). The final component alone is not unique
+    # when term lists from several namespace families belong to one vocabulary.
+    termList_subpath = list_localName.rstrip('/')
 
     # The containing vocabulary is stated explicitly in config.yaml rather than
     # inferred from the term-list IRI. This permits term lists such as eco/terms/
@@ -955,19 +957,27 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
                 if vocabularies_versions_metadata[mostRecentVocabularyNumber][version_uri] == termListVersion[0]:
                     newVocabularyMembersList.append(termListVersion[1])
 
-                    # dissect the term list version URI to pull out the local name of the term list version
-                    pieces = termListVersion[1].split('/')
-                    versionLocalNamePiece = pieces[len(pieces)-2]
+                    # Recover the complete term-list identity from its version IRI.
+                    # Example: http://rs.tdwg.org/eco/version/terms/2026-09-17
+                    # becomes "eco/terms".
+                    pieces = termListVersion[1].rstrip('/').split('/')
+                    versionLocalNamePiece = pieces[-4] + '/' + pieces[-2]
                     termListLocalNameList.append(versionLocalNamePiece)
             if aNewTermList:
                 # the new term list version needs be added to the list
                 newVocabularyMembersList.append(termlistVersionUri)
             else:
-                # For the modified term list, find its previous version and replace it with the new new version.
+                # Replace the previous version if this term list was already a
+                # member of the vocabulary. If it was not, add it; this covers
+                # an existing term list newly incorporated into this vocabulary.
+                termListFound = False
                 for termListVersionRowNumber in range(0, len(newVocabularyMembersList)):
                     if termList_subpath == termListLocalNameList[termListVersionRowNumber]:
-                        # change the term list version on the list to the new one
                         newVocabularyMembersList[termListVersionRowNumber] = termlistVersionUri
+                        termListFound = True
+                        break
+                if not termListFound:
+                    newVocabularyMembersList.append(termlistVersionUri)
         
         # Now that the list of new term list versions that are part of the new vocabulary version list is created,
         # add a record for each one to the vocabulary versions members table
@@ -981,17 +991,19 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
             # the new term list version needs be added to the list
             vocabularies_versions_members.append([vocabularyVersionUri, termlistVersionUri])
         else:
-            # For a modified term list, find its previous version and replace it with the new version.
+            # Replace the previous version if this term list is already a member
+            # of the new vocabulary version. Otherwise add it.
+            termListFound = False
             for termListVersionRowNumber in range(1, len(vocabularies_versions_members)):
-                # consider only term lists that match the vocabulary version URI
                 if vocabularies_versions_members[termListVersionRowNumber][0] == vocabularyVersionUri:
-                    # dissect the term list version URI to pull out the local name of the term list version
-                    pieces = vocabularies_versions_members[termListVersionRowNumber][1].split('/')
-                    versionLocalNamePiece = pieces[len(pieces)-2]
-                    # check for a match of the term list version local name with the namespace string
-                    if versionLocalNamePiece == namespace:
-                        # change the term list version on the list to the new one
+                    pieces = vocabularies_versions_members[termListVersionRowNumber][1].rstrip('/').split('/')
+                    versionLocalNamePiece = pieces[-4] + '/' + pieces[-2]
+                    if versionLocalNamePiece == termList_subpath:
                         vocabularies_versions_members[termListVersionRowNumber][1] = termlistVersionUri
+                        termListFound = True
+                        break
+            if not termListFound:
+                vocabularies_versions_members.append([vocabularyVersionUri, termlistVersionUri])
         
     # Write the updated vocabularies versions members table to a file
     writeCsv('../vocabularies-versions/vocabularies-versions-members.csv', vocabularies_versions_members)
