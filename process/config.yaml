@@ -33,7 +33,7 @@ vocab_type: 1
 list_of_terms_iri: http://rs.tdwg.org/dwc/doc/list/
 
 # IRI of the vocabulary represented in the List of Terms document
-vocabulary = http://rs.tdwg.org/dwc/
+vocabulary: http://rs.tdwg.org/dwc/
 
 # IRI of containing standard. Existing standards IRIs:
 # Darwin Core - http://www.tdwg.org/standards/450
