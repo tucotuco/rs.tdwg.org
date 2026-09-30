@@ -12,149 +12,7 @@ import shutil
 import datetime
 import copy
 import hashlib
-import tempfile
-import subprocess
-from pathlib import Path
 import pandas as pd
-
-from document_metadata_processing.tdwg_docs_metadata_update import update_document_metadata
-
-# -----------------------
-# Transaction wrapper
-# -----------------------
-# The processor historically writes many repository files incrementally. To make
-# a failed run atomic without changing those established generation semantics,
-# the complete workflow is first executed in a temporary copy of the repository.
-# Only a successful staged run is allowed to publish its file delta back to the
-# caller's working tree.
-_TRANSACTION_ENV = 'TDWG_PROCESS_TRANSACTION_CHILD'
-
-
-def _transaction_ignored(relative_path):
-    """Return True for repository content that is outside the metadata transaction."""
-    parts = Path(relative_path).parts
-    if not parts:
-        return False
-    if parts[0] == '.git' or '__pycache__' in parts:
-        return True
-    # Processing logs are audit output, not repository metadata. The child may
-    # write one, but it is deliberately not published by the transaction.
-    if len(parts) >= 2 and parts[0] == 'process' and parts[1] == 'logs':
-        return True
-    return False
-
-
-def _tree_manifest(root):
-    """Return {relative POSIX path: sha256} for transactional repository files."""
-    root = Path(root)
-    manifest = {}
-    for path in root.rglob('*'):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root)
-        if _transaction_ignored(rel):
-            continue
-        digest = hashlib.sha256()
-        with path.open('rb') as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-                digest.update(chunk)
-        manifest[rel.as_posix()] = digest.hexdigest()
-    return manifest
-
-
-def _copy_repository_for_transaction(source_root, staged_root):
-    """Create the candidate workspace without Git internals, caches, or logs."""
-    source_root = Path(source_root)
-    staged_root = Path(staged_root)
-
-    def ignore(directory, names):
-        rel_dir = Path(directory).resolve().relative_to(source_root.resolve())
-        ignored = set()
-        for name in names:
-            rel = rel_dir / name
-            if _transaction_ignored(rel):
-                ignored.add(name)
-        return ignored
-
-    shutil.copytree(source_root, staged_root, ignore=ignore)
-
-
-def _publish_transaction_delta(source_root, staged_root, before, after):
-    """Publish only the successful staged delta to the real working tree."""
-    source_root = Path(source_root)
-    staged_root = Path(staged_root)
-
-    deleted = sorted(set(before) - set(after))
-    changed = sorted(
-        path for path in after
-        if path not in before or before[path] != after[path]
-    )
-
-    # Copy replacements/creations first. os.replace makes each individual file
-    # publication atomic at the filesystem level.
-    for rel_string in changed:
-        rel = Path(rel_string)
-        source = staged_root / rel
-        destination = source_root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix='.' + destination.name + '.',
-            suffix='.tdwg-process-tmp',
-            dir=str(destination.parent),
-        )
-        os.close(fd)
-        temp_path = Path(temp_name)
-        try:
-            shutil.copy2(source, temp_path)
-            os.replace(temp_path, destination)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
-
-    for rel_string in deleted:
-        destination = source_root / rel_string
-        if destination.exists():
-            destination.unlink()
-
-
-def _run_transactionally_if_needed():
-    """Run the full processor in staging and publish only on successful completion."""
-    if os.environ.get(_TRANSACTION_ENV) == '1':
-        return
-
-    process_dir = Path(__file__).resolve().parent
-    repository_root = process_dir.parent
-    relative_script = Path(__file__).resolve().relative_to(repository_root)
-
-    with tempfile.TemporaryDirectory(prefix='tdwg-process-') as temp_dir:
-        staged_root = Path(temp_dir) / 'repository'
-        _copy_repository_for_transaction(repository_root, staged_root)
-        before = _tree_manifest(staged_root)
-
-        env = os.environ.copy()
-        env[_TRANSACTION_ENV] = '1'
-        staged_script = staged_root / relative_script
-        result = subprocess.run(
-            [sys.executable, staged_script.name],
-            cwd=staged_script.parent,
-            env=env,
-        )
-        if result.returncode != 0:
-            print(
-                'Processing failed in the staged workspace; '
-                'the repository working tree was not changed.',
-                file=sys.stderr,
-            )
-            raise SystemExit(result.returncode)
-
-        after = _tree_manifest(staged_root)
-        _publish_transaction_delta(repository_root, staged_root, before, after)
-        print('Published successful staged processing results to the repository.')
-
-    raise SystemExit(0)
-
-
-_run_transactionally_if_needed()
 
 # -----------------------
 # Configuration section
@@ -223,77 +81,7 @@ def readCsv(filename):
     fileObject.close()
     return array
 
-def _dedupe_rows(rows):
-    """Return rows with exact duplicate data rows removed, preserving first-seen order."""
-    if not rows:
-        return rows
-    result = [rows[0]]
-    seen = set()
-    for row in rows[1:]:
-        key = tuple(row)
-        if key not in seen:
-            seen.add(key)
-            result.append(row)
-    return result
-
-def _upsert_rows_by_columns(rows, key_columns):
-    """Keep one row per key, with the last generated representation winning."""
-    if not rows or len(rows) == 1:
-        return rows
-    header = rows[0]
-    indexes = [header.index(column) for column in key_columns]
-    last_by_key = {}
-    order = []
-    for row in rows[1:]:
-        key = tuple(row[index] for index in indexes)
-        if key not in last_by_key:
-            order.append(key)
-        last_by_key[key] = row
-    return [header] + [last_by_key[key] for key in order]
-
-def _normalize_generated_table(fileName, array):
-    """Normalize generated rows so repeated processing preserves stable identities.
-
-    Dated resources are stable identities and relationship tables are sets. A
-    rerun therefore replaces the generated representation of an existing identity
-    rather than adding another copy.
-    """
-    rows = _dedupe_rows(array)
-    if not rows:
-        return rows
-    header = rows[0]
-    basename = os.path.basename(fileName)
-
-    # Entity/version tables: the stable resource IRI identifies the row.
-    if basename == 'decisions.csv' and 'term_localName' in header:
-        rows = _upsert_rows_by_columns(rows, ['term_localName'])
-    elif basename in {'term-lists.csv'} and 'list' in header:
-        rows = _upsert_rows_by_columns(rows, ['list'])
-    elif basename in {'vocabularies.csv'} and 'vocabulary' in header:
-        rows = _upsert_rows_by_columns(rows, ['vocabulary'])
-    elif basename in {'standards.csv'} and 'standard' in header:
-        rows = _upsert_rows_by_columns(rows, ['standard'])
-    elif 'version' in header and basename.endswith('-versions.csv'):
-        # Detailed version-resource tables have a full `version` IRI column.
-        # Join tables with the same basename do not use a column literally named `version`.
-        rows = _upsert_rows_by_columns(rows, ['version'])
-
-    # A same-release rerun must never assert that a version replaces itself.
-    if 'replacements' in basename and len(rows) > 1:
-        filtered = [rows[0]]
-        for row in rows[1:]:
-            if len(row) >= 2:
-                replacing, replaced = row[0], row[1]
-                replacing_local = replacing.rstrip('/').split('/')[-1]
-                if replacing == replaced or replacing_local == replaced:
-                    continue
-            filtered.append(row)
-        rows = _dedupe_rows(filtered)
-
-    return rows
-
 def writeCsv(fileName, array):
-    array = _normalize_generated_table(fileName, array)
     fileObject = open(fileName, 'w', newline='', encoding='utf-8')
     writerObject = csv.writer(fileObject, lineterminator=os.linesep)
     for row in array:
@@ -313,14 +101,8 @@ def findColumnWithHeader(header_row_list, header_label):
         return [False, 0]
     
 def isoTime(offset):
-    """Return the deterministic metadata timestamp for the target release.
-
-    Metadata generated for a release must not depend on when the processor is
-    executed. The release date is the semantic modification date; midnight is
-    used as the canonical time component and the configured release offset is
-    retained. Historical timestamps already present in metadata are untouched.
-    """
-    return date_issued + "T00:00:00" + offset
+    currentTime = datetime.datetime.now()
+    return currentTime.strftime("%Y-%m-%dT%H:%M:%S") + offset
 
 # -------------
 # Core processing functions
@@ -443,7 +225,7 @@ def generate_and_copy_mapping_and_config_files(vocab_type, namespaceUri, databas
     writeCsv(file_path, versions_table)
 
 # This function contains the Step 3 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
-def determine_state_of_data_tables(database, modifications_filename, date_issued):
+def determine_state_of_data_tables(database, modifications_filename):
     # 2.1 read tables
     terms_metadata_filename = '../' + database + '/' + database + '.csv'
     terms_metadata = readCsv(terms_metadata_filename)
@@ -467,26 +249,18 @@ def determine_state_of_data_tables(database, modifications_filename, date_issued
     for term_number in range(1, len(modifications_metadata)):
         mods_term_localName.append(modifications_metadata[term_number][mods_local_name])
 
-    # Find new and modified terms. On a same-release rerun, a term first
-    # created by this release is still a new term for release-processing
-    # purposes; it must not be reinterpreted as a modification of itself.
+    # Find new and modified terms.
     new_terms = []
     modified_terms = []
-    created_result = findColumnWithHeader(terms_metadata[0], 'term_created')
-    metadata_created_column = created_result[1] if created_result[0] else None
 
     for test_term in mods_term_localName:
-        matching_row = None
-        for term in terms_metadata[1:]:
+        found = False
+        for term in terms_metadata:
             if test_term == term[metadata_localname_column]:
-                matching_row = term
-                break
-        if matching_row is None:
+                found = True
+                modified_terms.append(test_term)
+        if not found:
             new_terms.append(test_term)
-        elif metadata_created_column is not None and matching_row[metadata_created_column] == date_issued:
-            new_terms.append(test_term)
-        else:
-            modified_terms.append(test_term)
 
     return terms_metadata, modifications_metadata, mods_local_name, metadata_localname_column, mods_term_localName, new_terms, modified_terms
 
@@ -505,11 +279,8 @@ def generate_term_versions_metadata(database, versions, version_namespace, mods_
     version_term_local_name_column = findColumnWithHeader(term_versions_metadata[0], 'term_localName')[1]
 
     for term in modified_terms:
-        target_version = version_namespace + term + '-' + date_issued
         for version_row in range(1, len(term_versions_metadata)):
-            if (term_versions_metadata[version_row][version_term_local_name_column] == term
-                    and term_versions_metadata[version_row][version_status] == 'recommended'
-                    and term_versions_metadata[version_row][version_column] != target_version):
+            if term_versions_metadata[version_row][version_term_local_name_column] == term and term_versions_metadata[version_row][version_status] == 'recommended':
                 term_versions_metadata[version_row][version_status] = 'superseded'
                 term_versions_metadata[version_row][version_modified] = isoTime(local_offset_from_utc)
 
@@ -553,13 +324,10 @@ def generate_term_versions_metadata(database, versions, version_namespace, mods_
             # look through metadata for old versions to find the most recent version of the term
             mostRecent = 'a' # start with a string value earlier in alphabetization than any term version URI
             for version_row in range(1, len(term_versions_metadata)):
-                candidate_version = term_versions_metadata[version_row][version_column]
-                target_version = version_namespace + currentTermLocalName + '-' + date_issued
-                if (term_versions_metadata[version_row][version_term_local_name_column] == currentTermLocalName
-                        and candidate_version != target_version):
-                    # Make it the mostRecent if it's later than the previous mostRecent.
-                    if candidate_version > mostRecent:
-                        mostRecent = candidate_version
+                if term_versions_metadata[version_row][version_term_local_name_column] == currentTermLocalName:
+                    # Make it the mostRecent if it's later than the previous mostRecent
+                    if term_versions_metadata[version_row][version_column] > mostRecent:
+                        mostRecent = term_versions_metadata[version_row][version_column]
             # insert the most recent version found into the appropriate column
             newVersions[rowNumber][replaces_version] = mostRecent
         
@@ -588,7 +356,7 @@ def generate_term_versions_metadata(database, versions, version_namespace, mods_
         for oldVersion in versions_join_table:
             if count > 0: # skip the header row
                 # the second column in the join table is the term local name
-                if oldVersion[1] == modifiedTerm and oldVersion[0] != newVersion:
+                if oldVersion[1] == modifiedTerm:
                     # the first column in the join table is the full version URI
                     if oldVersion[0] > mostRecent:
                         mostRecent = oldVersion[0]
@@ -611,41 +379,46 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
     term_created = findColumnWithHeader(terms_metadata[0], 'term_created')[1]
     term_isDefinedBy = findColumnWithHeader(terms_metadata[0], 'term_isDefinedBy')[1]
 
-    # Materialize the target-release current state. Release classification
-    # (new versus modified) is intentionally separate from whether a current
-    # row already exists: on a same-release rerun, a term that was new in this
-    # release already has a current row and that row must be updated in place,
-    # not appended a second time.
+    # step through each row in the modification metadata table and modify existing current terms when applicable
     for mods_rownumber in range(1, len(modifications_metadata)):
         mods_localname_string = modifications_metadata[mods_rownumber][mods_local_name]
-
-        existing_row_number = None
-        for term_rownumber in range(1, len(terms_metadata)):
-            if mods_localname_string == terms_metadata[term_rownumber][term_localName]:
-                existing_row_number = term_rownumber
-                break
-
-        if existing_row_number is not None:
-            # Existing current row: update it in place. This covers both a
-            # genuinely modified term and a term that was new in this release
-            # but is being recomputed on a same-release rerun.
-            terms_metadata[existing_row_number][term_modified_dateTime] = isoTime(local_offset_from_utc)
-            terms_metadata[existing_row_number][term_modified] = date_issued
-            for column_number in range(0, len(modifications_metadata[0])):
-                result = findColumnWithHeader(terms_metadata[0], modifications_metadata[0][column_number])
-                if result[0] == True:
-                    terms_metadata[existing_row_number][result[1]] = modifications_metadata[mods_rownumber][column_number]
-        else:
-            # No current row exists: materialize a genuinely new term.
-            newTermRow = ['' for _ in range(0, len(terms_metadata[0]))]
+        modified = False
+        for term_name in modified_terms:
+            # only make a modification if it's on the list of terms to be modified
+            if mods_localname_string == term_name:
+                modified = True
+        # this section of code modifies existing terms
+        if modified:
+            # find the row in the terms metadata file for the term to be modified
+            for term_rownumber in range(1, len(terms_metadata)):
+                if mods_localname_string == terms_metadata[term_rownumber][term_localName]:
+                    terms_metadata[term_rownumber][term_modified_dateTime] = isoTime(local_offset_from_utc)
+                    terms_metadata[term_rownumber][term_modified] = date_issued
+                    # replace every column that's in the modifications metadata
+                    for column_number in range(0, len(modifications_metadata[0])):
+                        # find the column in the current terms metadata table that matches the modifications column and replace the current term's value
+                        result = findColumnWithHeader(terms_metadata[0], modifications_metadata[0][column_number])
+                        if result[0] == True:
+                            terms_metadata[term_rownumber][result[1]] = modifications_metadata[mods_rownumber][column_number]
+                        else:
+                            pass # this shouldn't really happen since there already was a check that all columns existed in the versions table
+        # this section of code adds new term metadata
+        else: 
+            newTermRow = []
+            for column in range(0, len(terms_metadata[0])):
+                newTermRow.append('')
             newTermRow[term_modified_dateTime] = isoTime(local_offset_from_utc)
             newTermRow[term_modified] = date_issued
             newTermRow[term_created] = date_issued
             newTermRow[term_isDefinedBy] = namespaceUri
+            # replace every column that's in the modifications metadata
             for column_number in range(0, len(modifications_metadata[0])):
+                # find the column in the current terms metadata table that matches the modifications column and replace the current term's value
                 result = findColumnWithHeader(terms_metadata[0], modifications_metadata[0][column_number])
                 if result[0] == True:
                     newTermRow[result[1]] = modifications_metadata[mods_rownumber][column_number]
+                else:
+                    pass # this shouldn't really happen since there already was a check that all columns existed in the versions table
             terms_metadata.append(newTermRow)
     writeCsv('../' + database + '/' + database + '.csv', terms_metadata)
 
@@ -859,12 +632,10 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
         mostRecentListNumber = 0 # dummy list number to be replaced when most recent list is found
         for termListRowNumber in range(1, len(term_lists_versions_metadata)):
             # the row is one of the versions of the list
-            candidate_version = term_lists_versions_metadata[termListRowNumber][version_uri]
-            if (term_lists_versions_metadata[termListRowNumber][list_uri] == termlist_uri
-                    and candidate_version != termlistVersionUri):
-                # The target release version is not its own predecessor.
-                if candidate_version > mostRecent:
-                    mostRecent = candidate_version
+            if term_lists_versions_metadata[termListRowNumber][list_uri] == termlist_uri:
+                # Make the version of the row the mostRecent if it's later than the previous mostRecent
+                if term_lists_versions_metadata[termListRowNumber][version_uri] > mostRecent:
+                    mostRecent = term_lists_versions_metadata[termListRowNumber][version_uri]
                     mostRecentListNumber = termListRowNumber
 
         # change the status of the most recent list to superseded
@@ -1138,12 +909,10 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
             mostRecentVocabularyNumber = 0 # dummy vocabulary number to be replaced when most recent vocabulary version is found
             for vocabularyRowNumber in range(1, len(vocabularies_versions_metadata)):
                 # the row is one of the versions of the vocabulary
-                candidate_version = vocabularies_versions_metadata[vocabularyRowNumber][version_uri]
-                if (vocabularies_versions_metadata[vocabularyRowNumber][vocabulary_uri] == vocabularyUri
-                        and candidate_version != vocabularyVersionUri):
-                    # The target release version is not its own predecessor.
-                    if candidate_version > mostRecent:
-                        mostRecent = candidate_version
+                if vocabularies_versions_metadata[vocabularyRowNumber][vocabulary_uri] == vocabularyUri:
+                    # Make the version of the row the mostRecent if it's later than the previous mostRecent
+                    if vocabularies_versions_metadata[vocabularyRowNumber][version_uri] > mostRecent:
+                        mostRecent = vocabularies_versions_metadata[vocabularyRowNumber][version_uri]
                         mostRecentVocabularyNumber = vocabularyRowNumber
 
             # change the status of the most recent vocabulary to superseded
@@ -1375,12 +1144,10 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
             mostRecentStandardNumber = 0 # dummy standard number to be replaced when most recent standard version is found
             for standardRowNumber in range(1, len(standards_versions_metadata)):
                 # the row is one of the versions of the standard
-                candidate_version = standards_versions_metadata[standardRowNumber][version_uri]
-                if (standards_versions_metadata[standardRowNumber][standard_uri] == standardUri
-                        and candidate_version != standardVersionUri):
-                    # The target release version is not its own predecessor.
-                    if candidate_version > mostRecent:
-                        mostRecent = candidate_version
+                if standards_versions_metadata[standardRowNumber][standard_uri] == standardUri:
+                    # Make the version of the row the mostRecent if it's later than the previous mostRecent
+                    if standards_versions_metadata[standardRowNumber][version_uri] > mostRecent:
+                        mostRecent = standards_versions_metadata[standardRowNumber][version_uri]
                         mostRecentStandardNumber = standardRowNumber
 
             # change the status of the most recent standard to superseded
@@ -1579,7 +1346,7 @@ for namespace in namespaces:
         generate_and_copy_mapping_and_config_files(vocab_type, namespaceUri, database, modifications_filename)
 
     # Step 3. Determine values needed to interpret and modify tables later
-    terms_metadata, modifications_metadata, mods_local_name, metadata_localname_column, mods_term_localName, new_terms, modified_terms = determine_state_of_data_tables(database, modifications_filename, date_issued)
+    terms_metadata, modifications_metadata, mods_local_name, metadata_localname_column, mods_term_localName, new_terms, modified_terms = determine_state_of_data_tables(database, modifications_filename)
 
     # Add the IRIs of terms that have changed to the list of changed terms
     for term in modified_terms:
@@ -1626,52 +1393,6 @@ for namespace in namespaces:
     })
 
     print('completed', namespaceUri, 'namespace')
-
-# -----------------------
-# Reconcile term-list-version status for the target release.
-#
-# The per-namespace processing above historically changed predecessor status as
-# a side effect of creating a new list version.  On a same-release rerun, that
-# made the final status depend on whether the target version already existed at
-# the start of the run.  Reconcile the complete target-release state here so a
-# first run and a rerun materialize the same statuses.
-# -----------------------
-def reconcile_term_list_version_statuses(date_issued, local_offset_from_utc):
-    filename = '../term-lists-versions/term-lists-versions.csv'
-    table = readCsv(filename)
-
-    document_modified_column = findColumnWithHeader(table[0], 'document_modified')[1]
-    version_modified_column = findColumnWithHeader(table[0], 'version_modified')[1]
-    status_column = findColumnWithHeader(table[0], 'status')[1]
-    list_column = findColumnWithHeader(table[0], 'list')[1]
-
-    # Only lists for which this release actually has a version participate.
-    target_lists = {
-        row[list_column]
-        for row in table[1:]
-        if row[version_modified_column] == date_issued
-    }
-
-    for row in table[1:]:
-        if row[list_column] not in target_lists:
-            continue
-
-        if row[version_modified_column] == date_issued:
-            desired_status = 'recommended'
-        elif row[version_modified_column] < date_issued:
-            desired_status = 'superseded'
-        else:
-            # Do not alter a later release if processing an older release state.
-            continue
-
-        if row[status_column] != desired_status:
-            row[status_column] = desired_status
-            row[document_modified_column] = isoTime(local_offset_from_utc)
-
-    writeCsv(filename, table)
-
-
-reconcile_term_list_version_statuses(date_issued, local_offset_from_utc)
 
 # -----------------------
 # Once the namespace loop is complete, values in the general_configuration
@@ -1728,7 +1449,6 @@ if decisions_df['rdfs_comment'].iloc[-1] != config['decisions_text']:
     decisions_df = pd.concat([decisions_df, pd.DataFrame([row_dict])], ignore_index=True)
 
     # Write the updated decisions CSV file
-    decisions_df = decisions_df.drop_duplicates(subset=['term_localName'], keep='last')
     decisions_df.to_csv('../decisions/decisions.csv', index=False)
 else:
     # The last decision is the same as in the config, so use its number as the decision number string
@@ -1753,24 +1473,7 @@ decisions_links_df = pd.concat(
     ignore_index=True
 )
 # Write the updated decisions-links CSV file
-decisions_links_df = decisions_links_df.drop_duplicates(keep='first')
-# A relationship is a set member; reruns must not append it again.
 decisions_links_df.to_csv('../decisions/decisions-links.csv', index=False)
-
-# -----------------------
-# Update the human-readable document metadata associated with this release.
-# The general configuration file was prepared above from config.yaml.
-# -----------------------
-
-process_dir = os.path.dirname(os.path.abspath(__file__))
-update_document_metadata(
-    repo_path=os.path.abspath(os.path.join(process_dir, '..')),
-    general_config_path=os.path.join(
-        process_dir,
-        'document_metadata_processing',
-        'general_configuration.yaml'
-    )
-)
 
 # -----------------------
 # Write a concise audit log for the completed processing run

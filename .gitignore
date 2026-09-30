@@ -3,3 +3,4 @@
 /.idea
 
 process/logs/
+__pycache__
