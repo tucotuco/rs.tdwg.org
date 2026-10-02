@@ -5,12 +5,15 @@
 # It is appended to all version IRIs. Format: YYYY-MM-DD
 date_issued: '2026-09-17'
 
-# Term-change CSV files are read from a release-specific audit directory derived from date_issued:
-#   dwc-revisions/dwc-revisions-YYYY-MM-DD/
-# Each configured namespace MUST have a CSV named <pref_namespace_prefix>.csv in that directory
-# (for example, dwc.csv, chrono.csv, or dcterms.csv). Keep the CSV present even when there are
-# no changes in that namespace; a header-only CSV means that the existing current terms and their
-# latest versions are carried forward without creating a new term-list version for that namespace.
+# Directory containing the dated release-input directories for this vocabulary.
+# The script derives the release-specific directory by appending '-' and date_issued to the
+# basename of this directory. For example, revision_directory: dwc-revisions and
+# date_issued: '2026-09-17' gives dwc-revisions/dwc-revisions-2026-09-17/.
+# Each configured namespace MUST have a CSV named <pref_namespace_prefix>.csv in that dated
+# directory (for example, dwc.csv, chrono.csv, or dcterms.csv). Keep the CSV present even when
+# there are no changes in that namespace; a header-only CSV means that the existing current terms
+# and their latest versions are carried forward without creating a new term-list version.
+revision_directory: dwc-revisions
 
 # UTC offset for the computer running the script (i.e. the appropriate offset for values produced by the
 # Python method datetime.datime.now() .
@@ -40,6 +43,10 @@ vocabulary: http://rs.tdwg.org/dwc/
 # Audiovisual Core - http://www.tdwg.org/standards/638
 # Latimer Core - http://www.tdwg.org/standards/643
 standard: http://www.tdwg.org/standards/450
+
+# Sequential number assigned to the Executive Committee decision for this release.
+# This is an authoritative release identifier and MUST NOT be inferred from processing history.
+decision_number: 62
 
 # Text to describe the Executive Committee Decision that approved the change.
 decisions_text: Darwin Core changes ratified as a part of the Darwin Core public review. https://github.com/tdwg/dwc/milestone/22.
