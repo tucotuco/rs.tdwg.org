@@ -2565,6 +2565,8 @@ for namespace in namespaces:
     namespace_results.append({
         'prefix': pref_namespace_prefix,
         'namespace_uri': namespaceUri,
+        'termlist_uri': termlist_uri,
+        'term_list_identity': urllib.parse.urlsplit(termlist_uri).path.strip('/'),
         'input_file': modifications_filename,
         'new_terms': list(new_terms),
         'modified_terms': list(modified_terms),
@@ -3030,8 +3032,10 @@ def generate_release_report():
     report_lines.append('# Darwin Core release ' + date_issued)
     report_lines.append('')
     report_lines.append(
-        'This report summarizes the proposed Darwin Core release at the Standard, '
-        'Vocabulary, and Term List levels. It does not enumerate individual term changes.'
+        'This report summarizes this Darwin Core release at the Standard, Vocabulary, '
+        'Term List, and term change levels. It does not provide details of individual '
+        'term changes, which can be found in the GitHub milestone upon which the '
+        'public review was based.'
     )
     report_lines.append('')
     report_lines.append('## Release')
@@ -3071,11 +3075,42 @@ def generate_release_report():
             report_lines.append('None.')
         else:
             for identity, display, change, previous, current in matching:
-                if category == 'Updated':
-                    report_lines.append(
-                        '- **' + display['label'] + '** (`' + identity + '`): ' +
-                        previous['date'] + ' → ' + current['date']
+                # Vocabulary membership changes and namespace term changes are
+                # independent: newly incorporated lists can contain modified terms.
+                results = [
+                    result for result in namespace_results
+                    if result['term_list_identity'] == identity
+                ] if category != 'Removed' else []
+                if len(results) > 1 or (category == 'Updated' and not results):
+                    raise ValueError(
+                        'Release report expected exactly one namespace result for '
+                        'updated or configured Term List ' + identity +
+                        '; found ' + str(len(results))
                     )
+                if results:
+                    if category == 'Updated':
+                        version_text = previous['date'] + ' → ' + current['date']
+                    else:
+                        version_text = 'version ' + display['date']
+                    report_lines.append(
+                        '#### ' + display['label'] + ' (`' + identity + '`): ' +
+                        version_text
+                    )
+                    report_lines.append('')
+                    result = results[0]
+                    for heading, key in (
+                        ('Terms added', 'new_terms'),
+                        ('Terms modified', 'modified_terms'),
+                    ):
+                        report_lines.append('##### ' + heading)
+                        report_lines.append('')
+                        terms = result[key]
+                        if terms:
+                            for term in terms:
+                                report_lines.append('- `' + result['prefix'] + ':' + term + '`')
+                        else:
+                            report_lines.append('None.')
+                        report_lines.append('')
                 else:
                     report_lines.append(
                         '- **' + display['label'] + '** (`' + identity + '`), version ' +
