@@ -2,7 +2,7 @@
 
 **Title:** Processing vocabulary changes
 
-**Date Modified:** 2026-09-30
+**Date Modified:** 2026-10-01
 
 **Part of TDWG Standard:** Not part of any standard
 
@@ -23,6 +23,8 @@
 [5 Generating JSON-LD for controlled vocabularies](#5-generating-json-ld-for-controlled-vocabularies)
 
 [6 Reference](#6-reference)
+
+[7 Metadata membership and version snapshots](#7-metadata-membership-and-version-snapshots)
 
 # 1 Introduction
 
@@ -111,7 +113,9 @@ The same workflow can also be used before ratification to generate draft metadat
 
 Earlier versions of the processing workflow required special branch management when revising drafts. Because processing modified repository metadata incrementally, a maintainer generally had to return to the unprocessed source state, correct the source files, create a new derived branch, and process again. This is no longer necessary.
 
-The current `process.py` is designed to be repeatable on the same working branch. Processing is performed in a staged temporary workspace and the generated changes are applied to the working repository only after processing succeeds. If processing fails, the repository is left unchanged. If the same inputs are processed again, no additional metadata changes are generated. If valid but incorrect source data or configuration produced an unwanted result, the maintainer can correct those inputs and run `process.py` again; the resulting metadata is the same as it would have been if the corrected inputs had been used on the first run.
+The current `process.py` is designed to be repeatable on the same working branch. Processing is performed in a staged temporary workspace and the generated metadata changes are applied to the working repository only after processing succeeds. Before publication, the script verifies that affected working-tree paths have not changed since processing began. Publication is transactional: if publication fails after one or more files have been replaced, the affected paths are restored to their pre-run state. Processing logs and release reports are published only after the metadata transaction succeeds. If processing fails, generated changes from that run are therefore not left partially applied to the repository.
+
+If the same inputs are processed again, no additional metadata changes are generated. If valid but incorrect source data or configuration produced an unwanted result, the maintainer can correct those inputs and run `process.py` again; the resulting metadata converges on the state represented by the corrected inputs. At the Vocabulary and Standard levels, this is achieved by reconstructing complete version snapshots from authoritative current membership rather than by copying a previous version and replacing only the member that changed.
 
 The normal draft-development cycle is therefore to create a working branch, edit the source CSV/YAML files, run `process.py`, inspect the resulting diffs, and repeat the edit/run/inspect cycle on that same branch until the results are satisfactory. It is still good Git practice to make appropriate commits and to keep source inputs clearly identifiable, but deleting and recreating a derived branch between processing attempts is no longer part of the required workflow.
 
@@ -119,7 +123,7 @@ Once the draft is final, the source inputs can be submitted and reviewed accordi
 
 # 3 Detailed workflow steps
 
-**Important note:** this workflow can only update metadata related to a single vocabulary (or a single document that is not a List of Terms) in one processing operation. For example, changes to terms in the Variant Controlled Vocabulary and in one or more namespaces in the main Audiovisual Core vocabulary require separate vocabulary processing runs, even though both vocabularies are part of the Audiovisual Core Standard. For a vocabulary update, `process.py` also updates the metadata for the associated List of Terms document automatically. If metadata for another document in the same standard must also be updated, run the standalone `tdwg_docs_metadata_update.py` workflow separately after the vocabulary processing so that the applicable standard version already exists. In the edge case where the only update to a standard is a non-List of Terms document, or where the standard does not include a List of Terms document, the existing document-only workflow may still require manual preparation of the applicable standard/version metadata.
+**Important note:** a vocabulary-processing run has one configured parent Vocabulary and one parent Standard. It can process multiple Term Lists/namespaces that belong to that Vocabulary, including Term Lists whose namespace IRIs differ from the Vocabulary IRI. Processing changes belonging to two different parent Vocabularies still requires separate processing runs. For example, changes to terms in the Variant Controlled Vocabulary and in one or more Term Lists in the main Audiovisual Core Vocabulary require separate vocabulary-processing runs, even though both Vocabularies are parts of the Audiovisual Core Standard. For a Vocabulary update, `process.py` also updates the metadata for the associated List of Terms document automatically. If metadata for another document in the same Standard must also be updated, run the standalone `tdwg_docs_metadata_update.py` workflow separately after the vocabulary processing so that the applicable Standard version already exists. In the edge case where the only update to a Standard is a non-List of Terms document, or where the Standard does not include a List of Terms document, the existing document-only workflow may still require manual preparation of the applicable Standard/version metadata.
 
 1. If you are not a maintainer of rs.tdwg.org, first fork the [rs.tdwg.org](https://github.com/tdwg/rs.tdwg.org) repository to your account so that you have write access for the changes you make. Clone the forked repository to your local drive.
 2. Create a new working branch of the repository. A name pattern like `ac-changes-2026-02-15` can help you keep track of the branch. The processing scripts operate entirely on the local repository; pushing intermediate commits to GitHub is not required. If you are creating or updating a human-readable document that is not a List of Terms document, prepare the document configuration described in steps 7 and 8 and use the standalone document metadata processor rather than the vocabulary workflow.
@@ -132,12 +136,13 @@ Once the draft is final, the source inputs can be submitted and reviewed accordi
 9. If you are creating a new vocabulary and the hand-edited CSV contains columns for additional properties beyond those required by the Standards Documentation Specification, manually edit the column header mapping file as described in section 3.1.
 10. At this point all source data required for processing should be in place. Making a commit here is RECOMMENDED because it provides a useful Git checkpoint, but the processing architecture no longer requires returning to this commit between iterations.
 11. Run [`process.py`](https://github.com/tdwg/rs.tdwg.org/blob/master/process/process.py) from the `process` directory. The script processes vocabulary metadata, updates term IRI redirect metadata in [`redirects.csv`](https://github.com/tdwg/rs.tdwg.org/blob/master/html/redirects.csv), and updates the metadata for the associated List of Terms document in the same operation.
-12. `process.py` performs the release processing in a staged temporary workspace. If processing fails, generated changes from that run are not applied to the working repository. Correct the configuration or source inputs and run the script again. An unexpected runtime exception therefore does not require restoring the repository merely to undo partially generated metadata.
-13. After a successful run, carefully examine the diffs for all changed files. If something is wrong with otherwise valid source data or configuration, edit those inputs on the same working branch and run `process.py` again. Processing is designed to converge on the state represented by the current inputs: an unchanged rerun produces no additional changes, and a corrected rerun replaces the previously generated result with the result corresponding to the corrected inputs. Deleting and recreating the branch is not required.
-14. When the generated metadata is satisfactory, commit the source and derived changes. If the goal is to generate a draft List of Terms document, push the branch to the fork as necessary and use that branch as the source for the Maintenance Group's List of Terms build process. The edit/run/inspect cycle can be repeated on the same branch as the draft evolves.
-15. If you are not a maintainer of rs.tdwg.org and the changes are being submitted to the Executive Committee for ratification, create the appropriate pull request containing the source inputs according to the Maintenance Group's release procedure. After ratification, rs.tdwg.org maintainers should ensure that the configured `date_issued` is the ratification date, run `process.py`, inspect the results, and commit the processed metadata.
-16. After the processed changes are merged to the master branch, term dereferencing for machine-readable metadata can be tested using the rs-test.tdwg.org server. For example, if `http://rs.tdwg.org/eco/terms/protocolNames` was added or modified, `http://rs-test.tdwg.org/eco/terms/protocolNames.rdf` should return RDF/XML containing the changes. There can be a delay between merging changes and their appearance on the test server.
-17. After testing, inform the Maintenance Group that the final metadata are available so that the authoritative List of Terms can be published on the standard's website. A new release of the rs.tdwg.org repository triggers deployment to the production server. Ideally, publication of the List of Terms precedes or coincides with that release so that redirects for new terms resolve to valid fragment identifiers. Server deployment and front-end caching can introduce additional delay before changes are visible.
+12. Before modifying metadata, `process.py` performs preflight validation of the relevant current and historical metadata. Among other checks, it detects ambiguous duplicate current identities, duplicate dated versions, and invalid or ambiguous version histories that would prevent deterministic reconstruction of the release. A preflight failure terminates processing without publishing generated metadata.
+13. `process.py` performs the release processing in a staged temporary workspace. After staged processing succeeds, it verifies that affected working-tree paths have not changed concurrently and then publishes the metadata as a transaction. If publication itself fails, affected paths are rolled back to their pre-run state. The processing log and generated release report are published only after successful metadata publication.
+14. After a successful run, carefully examine the diffs for all changed files and inspect the generated release report in `process/reports/`. If something is wrong with otherwise valid source data, configuration, or persistent membership metadata, correct those inputs on the same working branch and run `process.py` again. Processing is designed to converge on the state represented by the current inputs: an unchanged rerun produces no additional metadata changes, and a corrected rerun replaces the previously generated result with the result corresponding to the corrected inputs. Deleting and recreating the branch is not required.
+15. When the generated metadata is satisfactory, commit the source and derived changes. If the goal is to generate a draft List of Terms document, push the branch to the fork as necessary and use that branch as the source for the Maintenance Group's List of Terms build process. The edit/run/inspect cycle can be repeated on the same branch as the draft evolves.
+16. If you are not a maintainer of rs.tdwg.org and the changes are being submitted to the Executive Committee for ratification, create the appropriate pull request containing the source inputs according to the Maintenance Group's release procedure. After ratification, rs.tdwg.org maintainers should ensure that the configured `date_issued` is the ratification date, run `process.py`, inspect the results, and commit the processed metadata.
+17. After the processed changes are merged to the master branch, term dereferencing for machine-readable metadata can be tested using the rs-test.tdwg.org server. For example, if `http://rs.tdwg.org/eco/terms/protocolNames` was added or modified, `http://rs-test.tdwg.org/eco/terms/protocolNames.rdf` should return RDF/XML containing the changes. There can be a delay between merging changes and their appearance on the test server.
+18. After testing, inform the Maintenance Group that the final metadata are available so that the authoritative List of Terms can be published on the standard's website. A new release of the rs.tdwg.org repository triggers deployment to the production server. Ideally, publication of the List of Terms precedes or coincides with that release so that redirects for new terms resolve to valid fragment identifiers. Server deployment and front-end caching can introduce additional delay before changes are visible.
 
 
 ## 3.1 Modifying the column header mapping file
@@ -215,4 +220,78 @@ A term list is a group of related terms that share the same namespace part of th
 
 ## 6.4 Proliferation of new versions up the hierarchy
 
-A new term list version is updated in its parent vocabulary version and a new vocabulary version is updated in its parent standard version. A term list is only added to its parent vocabulary if it represents terms in a namespace that is not already represented in the vocabulary. Similarly, vocabularies are only added to a standard if they are new, although new versions of both the vocabulary and standard are recorded.
+A term change can require new versions at each applicable level of the hierarchy: Term, Term List, Vocabulary, and Standard. However, the processing script does not construct a new Vocabulary or Standard version merely by copying the previous version and substituting the changed child resource. Instead, it reconstructs the complete target-date snapshot from the persistent current-membership tables described in section 7.
+
+For each declared member of a Vocabulary, the processor resolves the Term List version that applies on the release date: a version issued on the release date is used when one exists; otherwise the latest prior version is carried forward. The same principle is used for the parts of a Standard. Thus unchanged Term Lists, Vocabularies, and Documents can be incorporated by reference to versions issued before the current release date. A membership change by itself can also require a new parent version even when no term metadata changed.
+
+This distinction is important because the dated membership tables are historical snapshots, not the source of truth for current containment. Current containment is declared separately, and each new Vocabulary or Standard version is expected to be a complete snapshot of the membership that applies to that release.
+
+# 7 Metadata membership and version snapshots
+
+The rs.tdwg.org metadata distinguishes between **current membership declarations** and **membership of dated versions**. This distinction is important for understanding both the data model and the behavior of `process.py`.
+
+Current membership tables state which resources are presently members or parts of higher-level resources. Dated membership tables record the complete membership of a particular version at a particular point in time. The current tables are therefore persistent configuration/state used to construct new snapshots; the dated tables are historical records and should not be treated as templates whose omissions are automatically inherited by later releases.
+
+## 7.1 Term membership and versions
+
+Current terms and their dated versions are stored in the database directory configured for each Term List. The processing script maintains the current term records, dated term-version records, and the join metadata relating current terms to their versions. A new or changed term can cause a new Term List version to be generated.
+
+The membership of a dated Term List version records the applicable version of every term in that Term List. Unchanged terms are represented by carrying forward their latest applicable earlier term versions rather than by creating unnecessary new term versions.
+
+## 7.2 Vocabulary membership
+
+Current Term List membership in a Vocabulary is stored in:
+
+`vocabularies/vocabularies-members.csv`
+
+Each row declares that a current Term List is a member of a current Vocabulary. This table is the authoritative source used by `process.py` when reconstructing the membership of a new Vocabulary version.
+
+Vocabulary versions are recorded in:
+
+`vocabularies-versions/vocabularies-versions.csv`
+
+The complete Term List membership of each dated Vocabulary version is stored in:
+
+`vocabularies-versions/vocabularies-versions-members.csv`
+
+When a target Vocabulary version is generated, `process.py` resolves every Term List declared in `vocabularies-members.csv` to the applicable Term List version on the release date. If a Term List has a version issued on the target date, that version is used; otherwise its latest unambiguous version issued before the target date is carried forward. The target Vocabulary membership rows are then written as a complete snapshot and checked against the declared current membership.
+
+This means that a Term List can become a member of a Vocabulary even if none of its terms changes in that release. Conversely, removing a Term List from `vocabularies-members.csv` means that it is not included in newly reconstructed Vocabulary versions, while historical Vocabulary versions continue to retain their recorded historical membership.
+
+## 7.3 Standard membership
+
+Current parts of a Standard are stored in:
+
+`standards/standards-parts.csv`
+
+This table declares the resources that are presently parts of each Standard. Parts can include Vocabularies and Documents.
+
+Standard versions are recorded in:
+
+`standards-versions/standards-versions.csv`
+
+The complete parts of each dated Standard version are stored in:
+
+`standards-versions/standards-versions-parts.csv`
+
+When a target Standard version is generated, `process.py` resolves each resource declared in `standards-parts.csv` to the applicable version on the release date. For a Vocabulary, the applicable version is resolved from the Vocabulary-version metadata. For a Document, the applicable version is resolved from the document-version metadata. A target-date version is used when one exists; otherwise the latest unambiguous prior version is carried forward. The resulting rows constitute the complete snapshot of the Standard at that version.
+
+Removing a current Vocabulary or Document from `standards-parts.csv` therefore prevents it from being included in newly reconstructed Standard versions, but does not alter historical Standard snapshots in `standards-versions-parts.csv`.
+
+## 7.4 Why current membership and historical snapshots are separate
+
+Separating current membership from historical version membership serves two different purposes:
+
+- the current membership tables express what belongs to a Vocabulary or Standard now and provide the authoritative containment input for the next release;
+- the dated membership tables preserve what belonged to each particular historical version.
+
+The processor validates histories sufficiently to resolve each declared member to one applicable version. Ambiguous duplicate identities or duplicate versions for the same resource and date are treated as errors rather than resolved by row order or other incidental properties of the CSV files.
+
+This reconstruction model also prevents an omission in an older dated snapshot from automatically propagating into a new release. A new Vocabulary or Standard version is derived from the authoritative current membership declarations and the applicable dated versions of those members, not from the membership rows of its predecessor.
+
+## 7.5 Processing log and release report
+
+A successful vocabulary-processing run writes an operational log under `process/logs/` and a Markdown release report under `process/reports/`. These files are intentionally outside the metadata transaction itself. They are generated in the staged workspace and are published to the working repository only after the metadata transaction succeeds.
+
+The release report summarizes the resulting Standard, Vocabulary, and Term List composition and compares it with the immediately preceding versions. It is intended to support review of a proposed release and can be adapted for use as a GitHub Release description after ratification. It does not replace inspection of the generated metadata diffs.
+
