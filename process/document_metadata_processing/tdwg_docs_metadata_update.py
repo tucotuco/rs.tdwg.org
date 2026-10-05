@@ -34,21 +34,93 @@ def csv_read(path, **kwargs):
         return dataframe
             
 
+def _ensure_dataframe_columns(dataframe, rows):
+    """Ensure that every key used by replacement rows exists as a DataFrame column."""
+    for row in rows:
+        for column in row:
+            if column not in dataframe.columns:
+                dataframe[column] = ''
+    return dataframe
+
+
+def _rows_dataframe(dataframe, rows):
+    """Build replacement rows using the existing DataFrame column order."""
+    if not rows:
+        return pd.DataFrame(columns=dataframe.columns)
+    normalized = [
+        {column: row.get(column, '') for column in dataframe.columns}
+        for row in rows
+    ]
+    return pd.DataFrame(normalized, columns=dataframe.columns)
+
+
 def upsert_dataframe_row(dataframe, row_data, key_columns):
-    """Replace any row with the same stable identity, then append the supplied representation."""
-    if len(dataframe) > 0:
-        mask = pd.Series(True, index=dataframe.index)
-        for column in key_columns:
-            mask &= dataframe[column] == row_data[column]
-        dataframe = dataframe.loc[~mask].copy()
-    return pd.concat([dataframe, pd.DataFrame([row_data])], ignore_index=True)
+    """Replace a stable-identity row in place, appending only a new identity.
+
+    Preserving the position of an existing row is important for byte-level
+    idempotence: an unchanged rerun must not move a row merely because it was
+    regenerated. If historical duplicate identities are encountered, they are
+    collapsed to one row at the position of the first occurrence.
+    """
+    dataframe = _ensure_dataframe_columns(dataframe.copy(), [row_data])
+
+    if len(dataframe) == 0:
+        return _rows_dataframe(dataframe, [row_data]).reset_index(drop=True)
+
+    mask = pd.Series(True, index=dataframe.index)
+    for column in key_columns:
+        mask &= dataframe[column] == row_data[column]
+
+    matching_positions = [
+        position for position, matched in enumerate(mask.tolist()) if matched
+    ]
+
+    if not matching_positions:
+        return pd.concat(
+            [dataframe, _rows_dataframe(dataframe, [row_data])],
+            ignore_index=True
+        )
+
+    first_position = matching_positions[0]
+    retained = dataframe.loc[~mask].reset_index(drop=True)
+    before = retained.iloc[:first_position]
+    after = retained.iloc[first_position:]
+    replacement = _rows_dataframe(dataframe, [row_data])
+    return pd.concat([before, replacement, after], ignore_index=True)
+
 
 def replace_dataframe_scope(dataframe, scope_column, scope_value, rows):
-    """Replace the complete generated relationship set for one resource/version."""
-    dataframe = dataframe[dataframe[scope_column] != scope_value].copy()
-    if rows:
-        dataframe = pd.concat([dataframe, pd.DataFrame(rows)], ignore_index=True)
-    return dataframe
+    """Replace one generated relationship scope without moving that scope.
+
+    Existing rows for the scope are replaced at the position of their first
+    occurrence. A previously absent scope is appended. This keeps regenerated
+    metadata deterministic while still allowing corrected input to replace the
+    complete generated relationship set.
+    """
+    dataframe = _ensure_dataframe_columns(dataframe.copy(), rows)
+
+    if len(dataframe) == 0:
+        return _rows_dataframe(dataframe, rows).reset_index(drop=True)
+
+    mask = dataframe[scope_column] == scope_value
+    matching_positions = [
+        position for position, matched in enumerate(mask.tolist()) if matched
+    ]
+
+    if not matching_positions:
+        if not rows:
+            return dataframe.reset_index(drop=True)
+        return pd.concat(
+            [dataframe, _rows_dataframe(dataframe, rows)],
+            ignore_index=True
+        )
+
+    first_position = matching_positions[0]
+    retained = dataframe.loc[~mask].reset_index(drop=True)
+    before = retained.iloc[:first_position]
+    after = retained.iloc[first_position:]
+    replacement = _rows_dataframe(dataframe, rows)
+    return pd.concat([before, replacement, after], ignore_index=True)
 
 def iso_time(version_date, offset):
     """Return the deterministic metadata timestamp for the target release."""
@@ -463,16 +535,6 @@ def update_document_metadata(repo_path, general_config_path):
         
         #print(json.dumps(new_author_data, indent=2))
     
-        if not new_document:
-            # For existing documents, any new data replaces the existing data.
-            # Remove existing rows where the doc IRI matches, then add in new author data
-            authors_df = authors_df[authors_df['document']!=doc_iri]
-            roles_df = roles_df[roles_df['document']!=doc_iri]
-        
-        # Write the modified author DataFrame back out to the authors data file
-        authors_df = pd.concat([authors_df, pd.DataFrame(author_data)])    
-        authors_df.to_csv(repo_path + 'docs/docs-authors.csv', index = False)
-    
         # The new (or replacement) rows for docs-roles.csv need to be constructed.
         roles_list = []
         for author in author_data:
@@ -484,9 +546,17 @@ def update_document_metadata(repo_path, general_config_path):
             if not contributor_role_column_header in roles_df.columns:
                 print('WARNING: author', author['contributor_literal'], 'has the role', author['contributor_role'], 'that is not an existing column in the docs-roles.csv file')
             roles_list.append(roles_dict)
-        # Now add the generated rows to the end of the dataframe and save
-        roles_df = pd.concat([roles_df, pd.DataFrame(roles_list)])    
-        roles_df.to_csv(repo_path + 'docs-roles/docs-roles.csv', index = False)    
+
+        # Replace generated current author/role scopes in place. For a new
+        # Document the scopes do not yet exist, so they are appended.
+        authors_df = replace_dataframe_scope(
+            authors_df, 'document', doc_iri, author_data
+        )
+        roles_df = replace_dataframe_scope(
+            roles_df, 'document', doc_iri, roles_list
+        )
+        authors_df.to_csv(repo_path + 'docs/docs-authors.csv', index = False)
+        roles_df.to_csv(repo_path + 'docs-roles/docs-roles.csv', index = False)
         
     else: # No new author data found, use existing data. The authors of the current documents (docs-authors.csv) are unchanged.
         # Load the existing data from the CSV
