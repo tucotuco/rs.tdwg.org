@@ -2585,6 +2585,7 @@ def reconcile_configured_containment():
     standard_parts = readCsv('../standards/standards-parts.csv')
     vocabulary_membership_changed = False
     standard_membership_changed = False
+    displaced_vocabulary_iris = set()
 
     configured_term_lists = []
     for namespace in namespaces:
@@ -2595,16 +2596,43 @@ def reconcile_configured_containment():
             configured_term_lists.append(term_list_uri)
 
     for term_list_uri in configured_term_lists:
-        matches = [
+        matching_rows = [
             row for row in vocabulary_members[1:]
-            if row[0] == vocabularyIri and row[1] == term_list_uri
+            if row[1] == term_list_uri
         ]
-        if len(matches) > 1:
+        configured_matches = [
+            row for row in matching_rows
+            if row[0] == vocabularyIri
+        ]
+
+        if len(configured_matches) > 1:
             raise ValueError(
                 'Vocabulary ' + vocabularyIri + ' contains duplicate current '
                 'membership for Term List ' + term_list_uri + '.'
             )
-        if not matches:
+
+        # Configuration declares the current containing Vocabulary for this
+        # Term List. If the Term List was previously contained by another
+        # Vocabulary, transfer current containment without altering historical
+        # Vocabulary-version membership snapshots.
+        previous_owners = {
+            row[0] for row in matching_rows
+            if row[0] != vocabularyIri
+        }
+        if previous_owners:
+            vocabulary_members = [
+                vocabulary_members[0]
+            ] + [
+                row for row in vocabulary_members[1:]
+                if not (
+                    row[1] == term_list_uri and
+                    row[0] != vocabularyIri
+                )
+            ]
+            displaced_vocabulary_iris.update(previous_owners)
+            vocabulary_membership_changed = True
+
+        if not configured_matches:
             vocabulary_members.append([vocabularyIri, term_list_uri])
             vocabulary_membership_changed = True
 
@@ -2633,7 +2661,11 @@ def reconcile_configured_containment():
     if standard_membership_changed:
         writeCsv('../standards/standards-parts.csv', standard_parts)
 
-    return vocabulary_membership_changed, standard_membership_changed
+    return (
+        vocabulary_membership_changed,
+        standard_membership_changed,
+        displaced_vocabulary_iris,
+    )
 
 
 def term_list_metadata_changed(namespace, termlist_uri):
@@ -2691,13 +2723,19 @@ def vocabulary_metadata_changed(vocabulary_config):
 changed_terms_iris = []
 namespace_results = []
 vocabulary_results = []
+displaced_vocabulary_iris = set()
 
 for vocabulary_config in vocabularies:
     activate_vocabulary(vocabulary_config)
     report('Vocabulary: processing ' + vocabulary_config['vocabulary_label'] + '.')
     higher_level_update_performed = False
     vocabulary_metadata_was_changed = vocabulary_metadata_changed(vocabulary_config)
-    vocabulary_membership_changed, standard_membership_changed = reconcile_configured_containment()
+    (
+        vocabulary_membership_changed,
+        standard_membership_changed,
+        displaced_by_this_vocabulary,
+    ) = reconcile_configured_containment()
+    displaced_vocabulary_iris.update(displaced_by_this_vocabulary)
 
     for namespace in namespaces:
         # Step 1 (from first cell in development Jupyter notebook simplified_process_rs_tdwg_org.ipynb)
@@ -2954,16 +2992,18 @@ for vocabulary_config in vocabularies:
 # depending on the state present at the start of the run.
 # -----------------------
 def reconcile_version_statuses(filename, identity_column_name, date_column_name,
-                               status_column_name, date_issued, local_offset_from_utc):
+                               status_column_name, date_issued, local_offset_from_utc,
+                               retired_identities=None):
     table = readCsv(filename)
     target_date = datetime.datetime.strptime(date_issued, '%Y-%m-%d').date()
+    retired_identities = set(retired_identities or [])
 
     document_modified_column = findColumnWithHeader(table[0], 'document_modified')[1]
     identity_column = findColumnWithHeader(table[0], identity_column_name)[1]
     date_column = findColumnWithHeader(table[0], date_column_name)[1]
     status_column = findColumnWithHeader(table[0], status_column_name)[1]
 
-    # Only resources for which this release actually has a version participate.
+    # Resources having a version in this release participate normally.
     target_identities = set()
     parsed_dates = {}
     for row_number in range(1, len(table)):
@@ -2974,20 +3014,37 @@ def reconcile_version_statuses(filename, identity_column_name, date_column_name,
         if version_date == target_date:
             target_identities.add(table[row_number][identity_column])
 
+    conflict = target_identities & retired_identities
+    if conflict:
+        raise ValueError(
+            'Resource identities cannot both have a target-release version and '
+            'be retired in the same release: ' + ', '.join(sorted(conflict))
+        )
+
+    participating_identities = target_identities | retired_identities
+
     changed = False
     for row_number in range(1, len(table)):
         row = table[row_number]
-        if row[identity_column] not in target_identities:
+        identity = row[identity_column]
+
+        if identity not in participating_identities:
             continue
 
         version_date = parsed_dates[row_number]
-        if version_date == target_date:
-            desired_status = 'recommended'
-        elif version_date < target_date:
-            desired_status = 'superseded'
-        else:
+
+        if version_date > target_date:
             # Do not alter a later release if processing an older release state.
             continue
+
+        if identity in retired_identities:
+            # Retirement does not mint a new version. All extant versions of the
+            # retired resource become historical.
+            desired_status = 'superseded'
+        elif version_date == target_date:
+            desired_status = 'recommended'
+        else:
+            desired_status = 'superseded'
 
         if row[status_column] != desired_status:
             row[status_column] = desired_status
@@ -3007,10 +3064,23 @@ if reconcile_version_statuses(
         ('term-lists-versions',), date_issued, local_offset_from_utc
     )
 
+# A Vocabulary displaced as the current owner of configured Term Lists is
+# retired only if it has no current Term List membership remaining after all
+# configured containment has been reconciled.
+current_vocabulary_members = readCsv('../vocabularies/vocabularies-members.csv')
+vocabularies_with_current_members = {
+    row[0] for row in current_vocabulary_members[1:]
+}
+retired_vocabulary_iris = {
+    vocabulary_iri for vocabulary_iri in displaced_vocabulary_iris
+    if vocabulary_iri not in vocabularies_with_current_members
+}
+
 if reconcile_version_statuses(
     '../vocabularies-versions/vocabularies-versions.csv',
     'vocabulary', 'version_issued', 'vocabulary_status',
-    date_issued, local_offset_from_utc
+    date_issued, local_offset_from_utc,
+    retired_identities=retired_vocabulary_iris
 ):
     update_dataset_index_modified(
         ('vocabularies-versions',), date_issued, local_offset_from_utc
