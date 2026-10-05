@@ -3333,38 +3333,81 @@ def _document_configuration_path(document_iri):
 
 
 def generic_document_changed(document_iri):
-    """Return whether an explicitly configured non-LoT Document needs a version.
+    """Return whether a configured non-LoT Document needs a release version.
 
-    A missing current Document is new. For an existing Document, a local
-    document_configuration.yaml, when present, is the maintained declaration of
-    intended metadata. Existing Documents without local updater configuration
-    are simply carried forward.
+    The per-Document ``doc_modified`` value is the maintainer's explicit signal
+    that the Document changed on a particular date. Stable Standard composition
+    in config.yaml must not itself cause old Documents to be re-versioned.
+
+    A Document absent from current metadata is new and must be processed. For an
+    existing Document, process it only when its configured ``doc_modified`` is
+    the target release date and that dated Document version does not already
+    exist. This also makes a same-release rerun idempotent. A future modification
+    date is rejected because that state cannot belong to the target release.
     """
     docs = readCsv('../docs/docs.csv')
     header = docs[0]
     current_col = findColumnWithHeader(header, 'current_iri')[1]
     matches = [row for row in docs[1:] if row[current_col] == document_iri]
-    if not matches:
-        return True
-    if len(matches) != 1:
+    if len(matches) > 1:
         raise ValueError(
-            'Expected exactly one current Document row for ' + document_iri + '.'
+            'Expected at most one current Document row for ' + document_iri + '.'
         )
 
     config_path = _document_configuration_path(document_iri)
     if not os.path.isfile(config_path):
+        if not matches:
+            raise ValueError(
+                'New configured Document lacks document_configuration.yaml: ' +
+                document_iri
+            )
         return False
+
     with open(config_path, 'rt', encoding='utf-8') as file_object:
         declared = yaml.safe_load(file_object) or {}
-    current = dict(zip(header, matches[0]))
-    for key, value in declared.items():
-        if key == 'mediaType' or value is None:
-            continue
-        if key == 'current_iri':
-            value = document_iri
-        if key in current and str(current[key]) != str(value):
-            return True
-    return False
+
+    if not matches:
+        return True
+
+    configured_modified = declared.get('doc_modified')
+    if not configured_modified:
+        raise ValueError(
+            'Configured Document lacks doc_modified in ' + config_path + '.'
+        )
+
+    try:
+        modified_date = datetime.date.fromisoformat(str(configured_modified))
+        target_date = datetime.date.fromisoformat(str(date_issued))
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            'Invalid Document modification/release date for ' + document_iri + '.'
+        ) from error
+
+    if modified_date > target_date:
+        raise ValueError(
+            'Configured Document ' + document_iri + ' has doc_modified ' +
+            modified_date.isoformat() + ', which is after target release ' +
+            target_date.isoformat() + '.'
+        )
+    if modified_date < target_date:
+        return False
+
+    # The Document is explicitly declared changed in this release. If its target
+    # version already exists, this is a same-release rerun and no update is needed.
+    versions = readCsv('../docs-versions/docs-versions.csv')
+    version_header = versions[0]
+    version_col = findColumnWithHeader(version_header, 'version_iri')[1]
+    identity_col = findColumnWithHeader(version_header, 'current_iri')[1]
+    target_version_iri = document_iri + date_issued
+    target_matches = [
+        row for row in versions[1:]
+        if row[identity_col] == document_iri and row[version_col] == target_version_iri
+    ]
+    if len(target_matches) > 1:
+        raise ValueError(
+            'Document version occurs more than once: ' + target_version_iri + '.'
+        )
+    return not target_matches
 
 
 def _write_general_document_config(document_iri, original_text):
