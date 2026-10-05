@@ -1,6 +1,41 @@
 # Written by Steve Baskauf 2020-06-29 CC0
 # Updated to run as a stand-alone script 2021-07-26
 # Additional modifications to require less manual work 2023-08-27
+# Refactored as a release-level transactional processor 2026-10-05
+
+"""Process one complete TDWG standards release into rs.tdwg.org metadata.
+
+The release is declared in ``process/config.yaml``. The configuration identifies
+the release date and Standard, the current Vocabulary and Document parts of that
+Standard, and the namespaces/Term Lists belonging to each configured Vocabulary.
+It also supplies the Executive Committee decision metadata for the release.
+
+Every configured namespace must have a release-input CSV in the configured
+revision directory. A header-only CSV means that the namespace participates in
+the release but has no term changes. ``config.yaml`` is authoritative for current
+Standard composition and configured Term List-to-Vocabulary containment. Dated
+membership tables are historical snapshots and are not used as templates for
+future membership.
+
+Vocabulary-associated Lists-of-Terms Documents are versioned when member Term
+Lists change or the Vocabulary's Term List membership changes. Other configured
+Documents use ``doc_modified`` in their per-Document
+``document_configuration.yaml`` as the explicit signal that they changed in this
+release.
+
+Processing is transactional. The complete workflow runs first in a temporary
+copy of the repository. The staged repository delta is published to the caller's
+working tree only after successful processing, with concurrent-edit detection and
+rollback if publication fails. Logs and release reports are published only after
+the metadata transaction succeeds.
+
+The processor is deterministic and intended to be same-release idempotent: an
+unchanged rerun should produce no repository metadata changes. It maintains
+current and versioned metadata for Terms, Term Lists, Vocabularies, Standards,
+Documents, redirects, and Executive Committee decisions. It does not build the
+human-readable standard documents themselves; those are built separately from
+the authoritative metadata produced here.
+"""
 
 import csv
 import json
@@ -521,7 +556,7 @@ def isoTime(offset):
 # Core processing functions
 # -------------
 
-# This function contains the Step 2 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Create repository table infrastructure for a newly declared Term List.
 def generate_and_copy_mapping_and_config_files(vocab_type, namespaceUri, database, modifications_filename):
     # get the mutable column headers from the modifications file
     modifications_metadata = readCsv(modifications_filename)
@@ -637,7 +672,7 @@ def generate_and_copy_mapping_and_config_files(vocab_type, namespaceUri, databas
     file_path = '../' + database + '-versions/' + database + '-versions.csv'
     writeCsv(file_path, versions_table)
 
-# This function contains the Step 3 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Classify release-input rows as new or modified relative to repository state.
 def determine_state_of_data_tables(database, versions, borrowed, utility_namespace, modifications_filename, date_issued):
     # 2.1 read tables
     terms_metadata_filename = '../' + database + '/' + database + '.csv'
@@ -756,7 +791,7 @@ def find_predecessor_row(metadata, resource_column, resource_value, issued_colum
 
     return predecessor_row
 
-# This function contains the Step 4 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Generate dated term-version metadata for release-input terms.
 def generate_term_versions_metadata(database, versions, version_namespace, mods_local_name, modified_terms,local_offset_from_utc, date_issued, modifications_metadata):
     term_versions_metadata_filename = '../' + versions + '/' + versions + '.csv'
     term_versions_metadata = readCsv(term_versions_metadata_filename)
@@ -846,7 +881,7 @@ def generate_term_versions_metadata(database, versions, version_namespace, mods_
     revised_versions_replacements_table = versions_replacements_table + newReplacements
     writeCsv('../' + versions + '/' + versions + '-replacements.csv', revised_versions_replacements_table)
 
-# This function contains the Step 5 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Update current term metadata and create/reconcile Term List release metadata.
 def generate_current_terms_metadata(standardUri, terms_metadata, modifications_metadata, mods_local_name, modified_terms, local_offset_from_utc, date_issued, namespaceUri, termlist_uri, database, versions, term_list_label, term_list_description, pref_namespace_prefix, use_namespace_in_fragment, prepend_url, separator, borrowed, has_term_changes):
     # list_localName is the complete path of the term-list IRI, independent of
     # scheme and host (for example, 'dwc/terms/' or 'dwc/terms/attributes/').
@@ -962,21 +997,10 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
             term_lists_table[rowNumber][list_description] = term_list_description
             term_lists_table[rowNumber][list_prefix_column] = pref_namespace_prefix
             term_lists_table[rowNumber][list_pref_namespace_column] = namespaceUri
-            # here is the opportunity to find out the standard URI for the modified term list
-            # 2024-03-01 note: this is now provided in the config.yaml file.
-            #standardUri = term_lists_table[rowNumber][standard_column]
-            # print(term_lists_table[rowNumber])
     if aNewTermList:  # this will happen if the term list did not previously exist
         # Create a new row for the term list table that is a list with length equal to the 0th row of the table
         new_term_list_row = [''] * len(term_lists_table[0])
         
-        """
-        try:
-            new_term_list = readCsv('files_for_new/new_term_list.csv')
-        except:
-            report('Could not create term list: new_term_list.csv is missing.')
-            sys.exit()
-        """
         # Note: no error trapping is done here, so make sure that the new_term_list columns are the same as term_lists_table
         new_term_list_row[modified_datetime] = isoTime(local_offset_from_utc)
         new_term_list_row[list_uri] = termlist_uri
@@ -989,19 +1013,6 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
         new_term_list_row[list_versions_database_column] = versions
         new_term_list_row[list_versions_uri_column] = termlistVersionUri
         new_term_list_row[standard_column] = standardUri
-
-        # This is now about the only value that's dependent on filling out the new_term_list.csv file.
-        # 2024-03-01 note: this is now provided in the config.yaml file.
-        #standardUri = new_term_list[1][standard_column]
-
-        """
-        # Assign the label and description passed into the function if not empty string. Otherwise, fall back on what's 
-        # already in the new term list table.
-        if term_list_label != '':
-            new_term_list_row[list_label] = term_list_label
-        if term_list_description != '':
-            new_term_list_row[list_description] = term_list_description
-        """
 
         # Label and description are now required in the config.yaml file, so no need to check for empty strings.
         new_term_list_row[list_label] = term_list_label
@@ -1081,29 +1092,7 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
     if aNewTermList:
         # Create a new row for the term list table that is a list with length equal to the 0th row of the table
 
-        """
-        # get the template for the term list version from first data row in the new_term_list_version.csv file
-        try:
-            new_term_list_version = readCsv('files_for_new/new_term_list_version.csv')
-        except:
-            report('Could not create term-list version: new_term_list_version.csv is missing.')
-            sys.exit()
-        """
-        #newListRow = new_term_list_version[1]
-
         mostRecentListNumber = None # no predecessor exists for a new term list
-
-        # Label, description, and pref prefix are now required in the config.yaml file, so no need to check for empty strings.
-        """
-        # Assign the label, description, and pref prefix passed into the function if not empty string. Otherwise, fall back on what's 
-        # already in the new term list version table.
-        if term_list_label != '':
-            newListRow[list_version_label] = term_list_label
-        if term_list_description != '':
-            newListRow[list_version_description] = term_list_description
-        if pref_namespace_prefix != '':
-            newListRow[list_version_prefix_column] = pref_namespace_prefix
-        """
 
     else:
         # Find the latest previous version by its explicit version date.
@@ -1115,9 +1104,6 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
         # change the status of the most recent list to superseded
         term_lists_versions_metadata[mostRecentListNumber][status_column] = 'superseded'
         term_lists_versions_metadata[mostRecentListNumber][document_modified] = isoTime(local_offset_from_utc)
-
-        # start the new list row with the metadata from the most recent list
-        #newListRow = copy.deepcopy(term_lists_versions_metadata[mostRecentListNumber])
 
     newListRow = [''] * len(term_lists_versions_metadata[0])
 
@@ -1141,7 +1127,7 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
 
     return version_uri, aNewTermList, term_lists_versions_members, term_lists_versions_metadata, mostRecentListNumber, termlistVersionUri, term_lists_versions_replacements, term_lists_table, term_list_rowNumber
 
-# This function contains the Step 6 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Construct complete membership for a new Term List version.
 def update_termlist_version_members(aNewTermList, mostRecentListNumber, date_issued, namespaceUri, database, new_terms, modified_terms, version_uri, termlistVersionUri, term_lists_versions_metadata, term_lists_versions_members, term_lists_versions_replacements):
     # create a list of every term version that was in the most recent previous list version
     newTermVersionMembersList = []
@@ -1247,7 +1233,7 @@ def update_dataset_index_modified(dataset_names, date_issued, local_offset_from_
     writeCsv(filename, table)
 
 
-# This function contains the Step 7 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Update current Vocabulary metadata and construct its target-date version.
 def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri, vocabularyIri, aNewTermList, termlist_uri):
     vocabularies_table_filename = '../vocabularies/vocabularies.csv'
     vocabularies_table = readCsv(vocabularies_table_filename)
@@ -1339,17 +1325,6 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
             vocabularies_table[rowNumber][vocabulary_dcterms_license_column] = config_vocab['dcterms_license']
 
     if aNewVocabulary: # this will happen if the vocabulary did not previously exist
-        """ 
-        try:
-            new_vocabulary_row = readCsv('files_for_new/new_vocabulary.csv')[1]
-        except:
-            report('Could not create vocabulary: new_vocabulary.csv is missing.')
-            sys.exit()
-        new_vocabulary_row[vocabulary_created] = date_issued
-        new_vocabulary_row[vocabulary_modified] = date_issued
-        new_vocabulary_row[modified_datetime] = isoTime(local_offset_from_utc)
-        vocabularies_table.append(new_vocabulary_row)
-        """
         # Create a new row for the vocabulary table that is a list with length equal to the 0th row of the table
         new_vocabulary_row = [''] * len(vocabularies_table[0])
 
@@ -1421,16 +1396,6 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
 
         if aNewVocabulary: # this will happen if the vocabulary did not previously exist
             pass
-            """
-            try:
-                newVocabularyRow = readCsv('files_for_new/new_vocabulary_version.csv')[1]
-            except:
-                report('Could not create vocabulary version: new_vocabulary_version.csv is missing.')
-                sys.exit()
-            
-            # the new row will be added to the end and therefore will have an index number - number of rows before appending
-            mostRecentVocabularyNumber = len(vocabularies_versions_metadata)
-            """
         else:
             # Find the latest previous version by its explicit issued date.
             mostRecentVocabularyNumber = find_predecessor_row(
@@ -1442,8 +1407,6 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
             vocabularies_versions_metadata[mostRecentVocabularyNumber][status_column] = 'superseded'
             vocabularies_versions_metadata[mostRecentVocabularyNumber][document_modified] = isoTime(local_offset_from_utc)
 
-            # start the new vocabulary row with the metadata from the most recent vocabulary
-            #newVocabularyRow = copy.deepcopy(vocabularies_versions_metadata[mostRecentVocabularyNumber])
 
         # Insert metadata into the new vocabulary row
         newVocabularyRow[document_modified] = isoTime(local_offset_from_utc)
@@ -1462,7 +1425,7 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
         # save as a file
         writeCsv('../vocabularies-versions/vocabularies-versions.csv', vocabularies_versions_metadata)
 
-    # Finding #29: construct the target Vocabulary version as a complete snapshot
+    # Construct the target Vocabulary version as a complete snapshot
     # of the Vocabulary's current declared Term List membership. The predecessor
     # snapshot is historical evidence, not the authority for current membership.
     tlv_list_column = findColumnWithHeader(term_lists_versions_metadata[0], 'list')[1]
@@ -1578,7 +1541,7 @@ def update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_ta
 
     return aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri
 
-# This function contains the last cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
+# Update current Standard metadata and construct its target-date version.
 def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vocab_subpath, vocabularyUri, vocabularyVersionUri, aNewVocabulary):
     standards_table_filename = '../standards/standards.csv'
     standards_table = readCsv(standards_table_filename)
@@ -1642,20 +1605,6 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
                 standards_table[rowNumber][standard_description] = config['standard_description']
 
     if aNewStandard: # this will happen if the standard did not previously exist
-        pass
-        """
-        try:
-            new_standard_row = readCsv('files_for_new/new_standard.csv')[1]
-        except:
-            report('Could not create Standard: new_standard.csv is missing.')
-            sys.exit()
-        new_standard_row[standard_created] = date_issued
-        new_standard_row[standard_modified] = date_issued
-        new_standard_row[modified_datetime] = isoTime(local_offset_from_utc)
-        # the row is set to what the last row will be after appending
-        standard_rowNumber = len(standards_table)
-        standards_table.append(new_standard_row)
-        """
         # Create a new row for the standard table that is a list with length equal to the 0th row of the table
         new_standard_row = [''] * len(standards_table[0])
 
@@ -1725,15 +1674,6 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
 
         if aNewStandard: # this will happen if the standard did not previously exist
             pass
-            """
-            try:
-                newStandardRow = readCsv('files_for_new/new_standard_version.csv')[1]
-            except:
-                report('Could not create Standard version: new_standard_version.csv is missing.')
-                sys.exit()
-            # the new row will be added to the end and therefore will have an index number - number of rows before appending
-            mostRecentStandardNumber = len(standards_versions_metadata)
-            """
         else:
             # Find the latest previous version by its explicit issued date.
             mostRecentStandardNumber = find_predecessor_row(
@@ -1745,8 +1685,6 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
             standards_versions_metadata[mostRecentStandardNumber][status_column] = 'superseded'
             standards_versions_metadata[mostRecentStandardNumber][document_modified] = isoTime(local_offset_from_utc)
 
-            # start the new standard row with the metadata from the most recent vocabulary
-            #newStandardRow = copy.deepcopy(standards_versions_metadata[mostRecentStandardNumber])
 
         # substitute metadata to make the most recent standard version have the modified dates for the new standard version
         newStandardRow[document_modified] = isoTime(local_offset_from_utc)
@@ -1770,7 +1708,7 @@ def update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vo
         # save as a file
         writeCsv('../standards-versions/standards-versions.csv', standards_versions_metadata)
 
-    # Finding #29: construct the target Standard version as a complete snapshot
+    # Construct the target Standard version as a complete snapshot
     # of the Standard's current declared parts. Resolve each current resource
     # identity through its own version metadata; do not inherit predecessor
     # omissions or retired parts.
@@ -2533,7 +2471,7 @@ activate_vocabulary(vocabularies[0])
 # Main routine
 # -----------------------
         
-# Finding #29: reconcile configured containment before processing individual
+# Reconcile configured containment before processing individual
 # namespaces. Membership itself is release state: an unchanged Term List may be
 # incorporated into a Vocabulary, and that containment change must be visible to
 # the complete target snapshot created later in the run.
@@ -2766,8 +2704,7 @@ for vocabulary_config in vocabularies:
     displaced_vocabulary_iris.update(displaced_here)
 
     for namespace in namespaces:
-        # Step 1 (from first cell in development Jupyter notebook simplified_process_rs_tdwg_org.ipynb)
-        # Set the values of flags that control the flow of program execution
+        # Activate namespace-specific release configuration.
         borrowed = namespace['borrowed']
         new_term_list = namespace['new_term_list']
         utility_namespace = namespace['utility_namespace']
@@ -2787,26 +2724,7 @@ for vocabulary_config in vocabularies:
             namespace['pref_namespace_prefix'] + '.csv'
         )
         version_namespace = namespaceUri + 'version/'
-        """
-        if new_term_list:
-            if 'label' in namespace:
-                term_list_label = namespace['label']
-            else:
-                term_list_label = ''
-            if 'description' in namespace:
-                term_list_description = namespace['description']
-            else:
-                term_list_description = ''
-            if 'pref_namespace_prefix' in namespace:
-                pref_namespace_prefix = namespace['pref_namespace_prefix']
-            else:
-                pref_namespace_prefix = ''
-        else:
-            term_list_label = ''
-            term_list_description = ''
-            pref_namespace_prefix = ''
-        """
-        # No longer make it an option to provide these values in the namespace configuration file. They are now required.
+        # These Term List metadata values are required release configuration.
         term_list_label = namespace['label']
         term_list_description = namespace['description']
         pref_namespace_prefix = namespace['pref_namespace_prefix']
@@ -2835,11 +2753,11 @@ for vocabulary_config in vocabularies:
                 indent=2,
             )
 
-        # Step 2. Create new mapping and configuration files. If run for existing term lists, it will overwrite a bunch of stuff
+        # Create database/mapping infrastructure only for a genuinely new Term List.
         if new_term_list:
             generate_and_copy_mapping_and_config_files(vocab_type, namespaceUri, database, modifications_filename)
 
-        # Step 3. Determine values needed to interpret and modify tables later
+        # Classify release-input terms against current and historical metadata.
         terms_metadata, modifications_metadata, mods_local_name, metadata_localname_column, mods_term_localName, new_terms, modified_terms = determine_state_of_data_tables(database, versions, borrowed, utility_namespace, modifications_filename, date_issued)
 
         # Add the IRIs of terms that have changed to the list of changed terms
@@ -2861,22 +2779,22 @@ for vocabulary_config in vocabularies:
         )
 
         if term_list_changed:
-            # Step 4. Create term versions-related metadata. Generally only applies to TDWG-minted terms, not borrowed ones
+            # Create dated term versions for TDWG-minted, non-utility namespaces.
             if (has_term_changes or new_term_list) and not borrowed and not utility_namespace:
                 generate_term_versions_metadata(database, versions, version_namespace, mods_local_name, modified_terms, local_offset_from_utc, date_issued, modifications_metadata)
 
-            # Step 5. Generate current terms metadata
+            # Reconcile current term and Term List metadata for this release.
             version_uri, aNewTermList, term_lists_versions_members, term_lists_versions_metadata, mostRecentListNumber, termlistVersionUri, term_lists_versions_replacements, term_lists_table, term_list_rowNumber = generate_current_terms_metadata(standardUri, terms_metadata, modifications_metadata, mods_local_name, modified_terms, local_offset_from_utc, date_issued, namespaceUri, termlist_uri, database, versions, term_list_label, term_list_description, pref_namespace_prefix, use_namespace_in_fragment, prepend_url, separator, borrowed, has_term_changes)
 
-            # Step 6. Update list of termlist version members and add the termlist replacement (TDWG namespaces only)
+            # Build complete Term List-version membership and replacement metadata.
             if not borrowed and not utility_namespace:
                 update_termlist_version_members(aNewTermList, mostRecentListNumber, date_issued, namespaceUri, database, new_terms, modified_terms, version_uri, termlistVersionUri, term_lists_versions_metadata, term_lists_versions_members, term_lists_versions_replacements)
 
-            # Step 7. Update vocabulary-related metadata
+            # Reconcile Vocabulary metadata and target-version membership.
             if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
                 aNewVocabulary, vocab_subpath, vocabularyUri, vocabularyVersionUri = update_vocabulary_metadata(date_issued, local_offset_from_utc, term_lists_table, term_list_rowNumber, termlistVersionUri, vocabularyIri, aNewTermList, termlist_uri)
 
-            # Step 8. Update standard-related metadata
+            # Reconcile Standard metadata and target-version composition.
             if not utility_namespace: # utility namespaces are not part of any vocabularies or standards
                 update_standard_metadata(date_issued, local_offset_from_utc, standardUri, vocab_subpath, vocabularyUri, vocabularyVersionUri, aNewVocabulary)
                 higher_level_update_performed = True
@@ -3540,8 +3458,9 @@ try:
         )
 
     # Process configured Documents that are not Vocabulary-associated Lists of
-    # Terms. The configuration is stable Standard composition; change detection
-    # comes from repository/document metadata, not a release-only flag.
+    # Terms. The documents list declares stable current Standard composition;
+    # each Document's document_configuration.yaml doc_modified value explicitly
+    # declares whether that Document changed in the target release.
     list_of_terms_documents = {
         vocabulary_config['list_of_terms_iri']
         for vocabulary_config in vocabularies

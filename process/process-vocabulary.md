@@ -1,30 +1,30 @@
-# Processing vocabulary changes
+# Processing vocabulary and document changes
 
-**Title:** Processing vocabulary changes
+**Title:** Processing vocabulary and document changes
 
-**Date Modified:** 2026-10-01
+**Date Modified:** 2026-10-05
 
 **Part of TDWG Standard:** Not part of any standard
 
-**Abstract:** Once vocabulary developers have defined terms using a spreadsheet, the data in that spreadsheet can be processed into other forms used to generate human and machine readable representations of the data in the spreadsheet. This document provides information about how to use scripts to generate those representations.
+**Abstract:** This document describes the maintainer workflow for processing one complete TDWG standards release into the metadata maintained in `rs.tdwg.org`. The release processor reads a stable `config.yaml`, release-specific namespace CSV files, and Document configuration files; validates the release; stages all generated metadata changes transactionally; and publishes the resulting repository delta only after successful processing. This document provides a short release recipe followed by detailed explanations of each step and of the metadata resources affected by processing.
 
-**Contributors:** Steve Baskauf (TDWG Technical Architecture Group, TDWG Audiovisual Core Maintenance Group, TDWG Darwin Core Maintenance Group), John Weiczorek (TDWG Darwin Core Maintenance Group)
+**Contributors:** Steve Baskauf (TDWG Technical Architecture Group, TDWG Audiovisual Core Maintenance Group, TDWG Darwin Core Maintenance Group), John Wieczorek (TDWG Darwin Core Maintenance Group)
 
 # Table of Contents
 
 [1 Introduction](#1-introduction)
 
-[2 Using this document](#2-using-this-document)
+[2 Release recipe](#2-release-recipe)
 
-[3 Detailed workflow steps](#3-detailed-workflow-steps)
+[3 Detailed workflow](#3-detailed-workflow)
 
-[4 Build script for a human readable List of Terms document](#4-build-script-for-a-human-readable-list-of-terms-document)
+[4 What `process.py` modifies](#4-what-processpy-modifies)
 
-[5 Generating JSON-LD for controlled vocabularies](#5-generating-json-ld-for-controlled-vocabularies)
+[5 Building a human-readable List of Terms document](#5-building-a-human-readable-list-of-terms-document)
 
-[6 Reference](#6-reference)
+[6 Generating JSON-LD for controlled vocabularies](#6-generating-json-ld-for-controlled-vocabularies)
 
-[7 Metadata membership and version snapshots](#7-metadata-membership-and-version-snapshots)
+[7 Reference](#7-reference)
 
 # 1 Introduction
 
@@ -32,266 +32,458 @@
 
 The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”, “SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “MAY”, and “OPTIONAL” in this document are to be interpreted as described in [BCP 14](https://www.rfc-editor.org/info/bcp14) [[RFC 2119]](https://datatracker.ietf.org/doc/html/rfc2119) and [[RFC 8174]](https://datatracker.ietf.org/doc/html/rfc8174) when, and only when, they appear in all capitals, as shown here.
 
-Use of 2119 keywords is not an indication that compliance is required by any TDWG standard. Rather, it is an indication that the associated software will not function as designed if the user does not comply with the requirements of this document.
+Use of RFC 2119 keywords is not an indication that compliance is required by a TDWG standard. Rather, it indicates requirements of the processing software and maintenance workflow described here.
 
 ## 1.2 Audience
 
-This document is intended for those who are responsible for maintaining the TDWG infrastructure. It can also be used by anyone who is developing a vocabulary and wants to generate draft term list documents from a hand-generated CSV file.
+This document is intended primarily for maintainers of the TDWG `rs.tdwg.org` infrastructure and for Maintenance Group members preparing release inputs. It may also be used by developers who need to generate draft metadata in a fork of `rs.tdwg.org` before ratification.
 
-## 1.3 Background
+## 1.3 Scope and current processing model
 
-The [TDWG Standards Documentation Specification](http://rs.tdwg.org/sds/doc/specification/) (SDS) indicates that all human and machine readable representations of vocabulary components should provide the same data. That can be achieved by using a script to generate those representations from common data sources: CSV files generated from a [basic hand-generated CSV file created by the vocabulary developers](create-vocabulary.md) and YAML files containing metadata about the components. The process is similar regardless of whether it is a new vocabulary or if modifications are being made to an existing vocabulary. 
+The [TDWG Standards Documentation Specification](http://rs.tdwg.org/sds/doc/specification/) (SDS) requires human- and machine-readable representations of standard components to be consistent. The authoritative metadata used to generate those representations are maintained in `rs.tdwg.org`.
 
-The majority of this document is focused on the process of generating the underlying data used to construct List of Terms documents. However, standards can also include documents other than Lists of Terms e.g., Darwin Core includes Text, XML, and RDF guides. Although these documents do not contain lists of terms, they do have basic document-level metadata that needs to be managed and made available when the document IRIs are dereferenced via a request for machine-readable RDF metadata. For List of Terms documents associated with vocabulary processing, `process.py` now performs the document metadata update as part of the same processing run. The document metadata processor can still be run independently for documents that are not Lists of Terms.
+The current `process.py` is a **release-level processor**. One invocation processes one complete release of one Standard. The release declaration in `process/config.yaml` identifies:
 
-NOTE: term deprecations cannot be carried out using this workflow and they require a number of special steps. See the [notes at the start of the detailed Jupyter notebook](process_rs_tdwg_org.ipynb) for specific steps that are necessary for term deprecations. In general, term deprecations should be avoided unless absolutely necessary.
+- the release date and Standard;
+- every current Vocabulary that is a direct part of that Standard;
+- every namespace/Term List belonging to each configured Vocabulary;
+- every current Document that is a direct part of the Standard;
+- release-specific namespace input CSV files; and
+- the Executive Committee decision metadata associated with the release.
 
-![overview of workflow](images/overview_workflow_diagram.jpg)
+A release can therefore contain **multiple Vocabularies** and **multiple Documents**. A separate `vocab.yaml` file is no longer part of this workflow; Vocabulary and Standard release configuration is consolidated in `config.yaml`.
 
-The diagram above shows a high-level view of how the hand-edited CSV file is combined with author and document metadata (in the form of YAML files provided by the vocabulary maintainers) to generate machine-readable metadata (in the form of RDF) and a human-readable List of Terms document. Ideally, this process involves a back-and-forth between the vocabulary maintainers (e.g. a Maintenance Group) and those who maintain the TDWG infrastructure (in particular, the rs.tdwg.org GitHub repository). The maintainers provide the raw data in the form of the hand-edited CSV and YAML files, which are then processed by script to generate the necessary authoritative files in the rs.tdwg.org repo. These authoritative files can then be used by the maintainers to generate (by script) an updated List of Terms document on their ancillary website. 
+For each configured namespace, a CSV named from its configured namespace prefix is expected in the release revision directory. A CSV containing only its header means that the namespace participates in the release but has no term changes.
 
-The same workflow can be used to generate draft documents using a fork of the rs.tdwg.org repo prior to final ratification of term changes. In that case the maintainers can simulate the entire process without merging the changes into the `master` branch of rs.tdwg.org . See [Section 2.3 below](https://github.com/tdwg/rs.tdwg.org/blob/master/process/process-vocabulary.md#23-generating-drafts) for details.
+`config.yaml` is also the authoritative declaration of **current containment** for processing purposes. Its Vocabulary/namespace structure determines current Term List-to-Vocabulary ownership, and its `documents` list together with the configured Vocabularies determines the current direct composition of the Standard. Dated Vocabulary- and Standard-version membership tables remain historical snapshots and are not templates from which future membership is inferred.
 
-The following diagrams show some of the details of the steps shown in the overview above.
+The processor also manages Document metadata. Vocabulary-associated Lists-of-Terms Documents are versioned when a member Term List changes or the Vocabulary's current Term List membership changes. Other configured Documents use `doc_modified` in their `document_configuration.yaml` as the explicit signal that the Document changed in the target release.
 
-![generation of metadata tables](images/table-generation.png)
+Term deprecations are not supported by the normal workflow described here. See [section 3.11](#311-legacy-notebooks-and-term-deprecations).
 
-A Python script ("A" in the overview diagram) uses the data present in the hand-generated CSV files to generate several CSV files ("2" in the overview diagram) that contain all of the metadata required by the SDS. The data are used to generate specific term versions and to update the current terms by automatically adding some fields that are generated by the script. The script also links the versions to the current terms in a join table.
+# 2 Release recipe
 
-![generation of machine readable metadata](images/machine-readable-mapping.png)
+This section is the short recipe. Follow the links for the details and for explanations of the repository resources affected by each operation.
 
-Data in the generated current terms CSV file is used with a mapping table to generate machine-readable metadata ("6" in the overview diagram) about the terms. The mapping table is hand-edited as necessary when the vocabulary is first created and relates the header names in the current terms CSV file to the abbreviated property IRIs used in the machine readable representation.
+1. **Create or select a working branch and prepare the release directory.** Start from the repository state that should precede the release. A pre-processing commit is RECOMMENDED as a useful checkpoint. See [3.1](#31-create-the-working-branch-and-release-directory).
+2. **Prepare one release-input CSV for every configured namespace.** Include only the new or modified terms; use a header-only file when there are no term changes in that namespace. See [3.2](#32-prepare-namespace-release-input-csv-files).
+3. **Update `process/config.yaml` for the complete Standard release.** Declare the complete current Vocabulary, namespace/Term List, and Document composition—not only resources that changed. See [3.3](#33-configure-the-complete-release-in-configyaml).
+4. **Update Document source metadata where necessary.** For a changed non-List-of-Terms Document, set its `doc_modified` to the release date. Update author configuration only when author/role metadata changes. See [3.4](#34-prepare-document-metadata).
+5. **Run `process.py` from the `process` directory.** Preflight validation and the complete release run occur in a staged temporary repository. Nothing is published to the working tree unless staged processing succeeds. See [3.5](#35-run-the-processor).
+6. **Inspect the generated release carefully.** Review console output, the generated release report, the processing log, `git diff --check`, `git status --short`, `git diff --stat`, and the substantive diff. See [3.6](#36-review-the-generated-release) and [section 4](#4-what-processpy-modifies).
+7. **If anything is wrong, correct the authoritative input and run `process.py` again on the same branch.** The processor is designed to converge on the state represented by the current inputs. An unchanged same-release rerun should produce no additional repository metadata changes. See [3.7](#37-correct-and-rerun).
+8. **When the release is correct, commit and publish it through the normal TDWG release process.** See [3.8](#38-commit-publish-and-test).
 
-![generation of human readable document](images/human-readable-mapping.png)
+For draft work before ratification, use the same process in a fork or working branch; see [3.9](#39-generating-drafts).
 
-### 1.3.1 Human readable document listing terms
+# 3 Detailed workflow
 
-The current terms CSV file ("2" in the overview diagram) and metadata YAML files ("3" in the overview diagram) can also be used along with a Python build script ("E" in the diagram above) to create a human readable document listing terms and their metadata (a "List of Terms" document; "8" in the diagram above). The List of Terms build script is managed by the Maintenance Group, so the details of its operation vary by vocabulary. However, to ensure that the principle that metadata in any serialization is the same, the script MUST draw from the authoritative CSV files in rs.tdwg.org (or the appropriate current [document_configuration.yaml document configuration files](document_metadata_processing)) to ensure that is the case. 
+## 3.1 Create the working branch and release directory
 
-**Technical note:** There is a distinction between this document listing terms and a "term list" document. *Term list* is a technical term defined in [section 3.3.3 of the SDS](http://rs.tdwg.org/sds/doc/specification/) denoting a list of terms incorporated into a vocabulary that share a common namespace. Therefore, a "term list" document is a document that describes all of the terms included in a term list. The document listing terms that is described here may or may not be the same as a "term list" document since it can include terms from a single namespace or terms from an entire vocabulary that consists of multiple term lists. Documents listing terms in a vocabulary are typically called "List of Terms" documents.
+1. Clone the TDWG [`rs.tdwg.org`](https://github.com/tdwg/rs.tdwg.org) repository, or a fork if you do not have write access to the TDWG repository.
+2. Create a working branch from the repository state that should immediately precede the release. A branch name such as `ac-changes-YYYY-MM-DD` or `dwc-changes-YYYY-MM-DD` is useful.
+3. Create or update the release-specific revision directory under `process`. The normal pattern is a dated directory such as `dwc-revisions/dwc-revisions-YYYY-MM-DD`.
+4. Preserve the source inputs and processor/configuration changes in Git. Making a commit before running `process.py` is RECOMMENDED because it clearly distinguishes the pre-processing release state from generated metadata, even though the processor no longer requires branch recreation between iterations.
 
-During the initial vocabulary development process, a List of Terms build script can be used to generate drafts for review. Re-running the build script will cause changes or corrections made to the hand generated CSV file to be reflected in a revised document listing terms. Typically, the drafts are managed in a fork of rs.tdwg.org, since the developing task group will generally not have write access to rs.tdwg.org . See [Section 2.3 below](https://github.com/tdwg/rs.tdwg.org/blob/master/process/process-vocabulary.md#23-generating-drafts) for details.
+The processor operates on the current working tree, so source/configuration edits do not have to be committed before processing. The checkpoint is for maintainability and review, not a technical requirement.
 
-### 1.3.2 Redirection for human-readable term metadata during content negotiation
+## 3.2 Prepare namespace release-input CSV files
 
-For term IRIs, redirection during content-negotiation for machine-readable representations is handled automatically by the server, since those representations are generated directly from the metadata stored in the rs.tdwg.org repo. However, the human-readable representations redirect to fragment identifiers in List of Terms documents. For currently maintained vocabularies, these are usually GitHub Pages-generated web pages whose actual page URLs do not correspond to the term IRIs. Correct redirection is controlled by the redirect URL in the [`redirects.csv` file](https://github.com/tdwg/rs.tdwg.org/blob/master/html/redirects.csv) in the `html` directory of the `rs.tdwg.org`. The `process.py` processing script will update this table automatically using data from the appropriate `config.yaml`, file but vocabulary maintainers MUST make sure that the fragment identifiers in the List of Terms documents they generate follow a pattern that can be specified in the `config.yaml` file. 
+Each configured namespace MUST have a release-input CSV in the configured release directory. The filename is the configured `pref_namespace_prefix` followed by `.csv`.
 
-The convention as of 2026-03-17 is to construct the fragment identifier by concatenating the namespace abbreviation + "_" + the local name. For example, the fragment identifier for `dwc:recordedBy` would be `dwc_recordedBy` (case of both namespace and local name preserved). The redirect URL would then be the actual page URL + "#" + the fragment identifier. In this example, the redirect URL for <http://rs.tdwg.org/dwc/terms/recordedBy> would be <https://dwc.tdwg.org/list/#dwc_recordedBy>. An example of the appropriate field values to specify this construction are [here](https://github.com/tdwg/rs.tdwg.org/blob/ab0fb23b55aa47b141d84e2c0f9b8ea882692e12/process/dwc-revisions/dwc-revisions-2025-07-10/config.yaml#L89-L100). The necessary tagging in the raw Markdown file to set the fragment identifier in the list of terms document is shown [here](https://github.com/tdwg/dwc/blob/237bf09e293cef0b001734d259ddcd3d43ac96b0/docs/list/index.md?plain=1#L14352).
+For an existing namespace:
 
-# 2 Using this document
+- start from the column structure used by a recent release;
+- retain the required headers;
+- include a data row for each term that is new or whose metadata changes in this release; and
+- use a header-only CSV when the namespace participates in the release but has no term changes.
 
-Since this document is intended for use by those who are responsible for maintaining the TDWG infrastructure, it is assumed that the user has a basic understanding of the TDWG infrastructure and the standards that are maintained by TDWG. 
+When updating an existing term, reuse unchanged values from the authoritative current metadata where practical. This minimizes accidental lexical changes to fields that were not intended to change.
 
-## 2.1 Skills required
+For a newly created Term List, set `new_term_list: true` for that namespace in `config.yaml`. For an existing Term List, set it to `false`. Preflight validation checks this declaration against existing repository Term List metadata and fails if the declaration and repository state disagree.
 
-To carry out the process described in this document, you need to know how:
-- to use Git and GitHub. The simplest way to carry out the necessary operations is to download the [GitHub Desktop client](https://desktop.github.com/). An introduction to Git and GitHub is [here](http://vanderbi.lt/github).
-- to edit a YAML configuration file using a text editor.
-- to run a Python script, and have Python installed on your local computer.
+Borrowed namespaces and utility namespaces follow the configuration rules documented in `config.yaml`. Borrowed namespaces require an explicit `termlist_uri`; non-borrowed namespaces normally use the namespace IRI itself as the Term List IRI.
 
-![workflow diagram](workflow.jpg)
+See [4.1](#41-terms-and-term-versions) and [4.2](#42-term-lists-and-term-list-versions) for the metadata affected by namespace processing.
 
-## 2.2 Required inputs
+## 3.3 Configure the complete release in `config.yaml`
 
-After cloning the rs.tdwg.org repository (or a fork of it) to your local drive, the principal processing script is `process.py`. For vocabulary/List of Terms processing, this script processes the hand-generated vocabulary metadata CSV files and automatically invokes the document metadata update as part of the same run. The reusable `tdwg_docs_metadata_update.py` module remains available in the `document_metadata_processing` directory and can also be run independently when only human-readable document metadata needs to be updated.
+`process/config.yaml` is the stable release declaration. It is not merely a list of resources that changed.
 
-Prior to beginning the processing steps, several data files are required. These include the underlying metadata and some configuration files:
+At the release level it supplies, among other settings:
 
-- an `authors_configuration.yaml` file that contains metadata about the authors of the document. 
-- a `document_configuration.yaml` file that contains metadata about the document.
-- a separate hand-generated CSV file for each namespace to be processed (vocabularies/List of Terms only). Each hand generated file represents a term list. The term lists MUST be part of the same vocabulary. Processing of multiple vocabularies requires separate processing runs.
-- a `config.yaml` file that contains the configuration settings for the processing script (vocabularies/List of Terms only). This file is used to specify the location of the hand-generated CSV files and to specify how the processing script should process the data in those files. The configuration file also contains some term list-level metadata. 
-- a `vocab.yaml` file that contains metadata about the vocabulary and standard that include the term changes (vocabularies/List of Terms only).
+- `date_issued`;
+- `local_offset_from_utc`;
+- the Standard IRI and applicable Standard metadata;
+- `revision_directory` and, when supplied, `release_directory`;
+- `decision_number` and `decisions_text`;
+- the complete list of current Vocabularies; and
+- the complete list of current direct Documents.
 
-An additional file, `general_configuration.yaml`, is required for updating the metadata about human-readable documents. It is generated/updated automatically as part of `process.py` when processing the List of Terms document associated with a vocabulary. It must be edited manually when `tdwg_docs_metadata_update.py` is run independently for another (non-List of Terms) document.
+Each Vocabulary configuration supplies its identity and metadata, the IRI of its human-readable List-of-Terms Document, its vocabulary type, and its complete list of participating namespaces/Term Lists. Each namespace configuration supplies the namespace identity, dataset names, Term List identity and metadata, redirect construction information, and flags such as `borrowed`, `utility_namespace`, and `new_term_list`.
 
-## 2.3 Generating drafts
+The `documents` array declares the current direct Document parts of the Standard. Each entry contains the permanent Document IRI. Do not limit this list to Documents changed in the release.
 
-The workflow below describes how changes to terms in a vocabulary would be made by maintainers of the rs.tdwg.org repository, starting with the hand-edited source CSV files containing the changes, and ending with a new release of the rs.tdwg.org repo, resulting in the changes going "live" (i.e. term IRIs dereferencing to updated human-readable Lists of Terms or machine-readable RDF). This assumes that the changes have been finalized and ratified through the change process described in the [TDWG Vocabulary Maintenance Specification](http://rs.tdwg.org/vms/doc/specification/).
+A single processing run can contain multiple Vocabularies. Namespace prefixes and dataset names must be unambiguous across the complete release configuration.
 
-The same workflow can also be used before ratification to generate draft metadata and List of Terms documents for proofreading, soliciting comments, and presentation to the Executive Committee. A member of a Task Group or Maintenance Group who does not have write access to the TDWG rs.tdwg.org repository can carry out the workflow in a personal fork and use the processed branch as the data source for the relevant List of Terms build script.
+`vocab.yaml` is **not used by the current processor**. Vocabulary and Standard release configuration that earlier workflows split between files is now represented in `config.yaml`.
 
-Earlier versions of the processing workflow required special branch management when revising drafts. Because processing modified repository metadata incrementally, a maintainer generally had to return to the unprocessed source state, correct the source files, create a new derived branch, and process again. This is no longer necessary.
+Two consequences of this configuration model are particularly important:
 
-The current `process.py` is designed to be repeatable on the same working branch. Processing is performed in a staged temporary workspace and the generated metadata changes are applied to the working repository only after processing succeeds. Before publication, the script verifies that affected working-tree paths have not changed since processing began. Publication is transactional: if publication fails after one or more files have been replaced, the affected paths are restored to their pre-run state. Processing logs and release reports are published only after the metadata transaction succeeds. If processing fails, generated changes from that run are therefore not left partially applied to the repository.
+1. The configured Vocabulary/namespace hierarchy is authoritative for **current Term List ownership**. A Term List can move from one Vocabulary to another without changing any of its terms.
+2. The configured Vocabularies plus the `documents` list are authoritative for **current Standard composition**. A new Standard version is constructed from this current declaration, not by copying the parts of the preceding Standard version.
 
-If the same inputs are processed again, no additional metadata changes are generated. If valid but incorrect source data or configuration produced an unwanted result, the maintainer can correct those inputs and run `process.py` again; the resulting metadata converges on the state represented by the corrected inputs. At the Vocabulary and Standard levels, this is achieved by reconstructing complete version snapshots from authoritative current membership rather than by copying a previous version and replacing only the member that changed.
+See [4.3](#43-vocabularies-and-vocabulary-version-snapshots) and [4.4](#44-standard-composition-and-standard-version-snapshots).
 
-The normal draft-development cycle is therefore to create a working branch, edit the source CSV/YAML files, run `process.py`, inspect the resulting diffs, and repeat the edit/run/inspect cycle on that same branch until the results are satisfactory. It is still good Git practice to make appropriate commits and to keep source inputs clearly identifiable, but deleting and recreating a derived branch between processing attempts is no longer part of the required workflow.
+## 3.4 Prepare Document metadata
 
-Once the draft is final, the source inputs can be submitted and reviewed according to the normal TDWG process. After ratification, rs.tdwg.org maintainers should verify that `date_issued` in `config.yaml` contains the ratification date, run `process.py`, inspect the generated metadata, and commit the resulting source and derived changes. The Maintenance Group can then use the authoritative metadata to build and publish the final List of Terms document.
+Document source metadata is stored under `process/document_metadata_processing/` in a directory derived from the permanent Document IRI. For example:
 
-# 3 Detailed workflow steps
+`http://rs.tdwg.org/dwc/doc/list/` → `dwc_doc_list`
 
-**Important note:** a vocabulary-processing run has one configured parent Vocabulary and one parent Standard. It can process multiple Term Lists/namespaces that belong to that Vocabulary, including Term Lists whose namespace IRIs differ from the Vocabulary IRI. Processing changes belonging to two different parent Vocabularies still requires separate processing runs. For example, changes to terms in the Variant Controlled Vocabulary and in one or more Term Lists in the main Audiovisual Core Vocabulary require separate vocabulary-processing runs, even though both Vocabularies are parts of the Audiovisual Core Standard. For a Vocabulary update, `process.py` also updates the metadata for the associated List of Terms document automatically. If metadata for another document in the same Standard must also be updated, run the standalone `tdwg_docs_metadata_update.py` workflow separately after the vocabulary processing so that the applicable Standard version already exists. In the edge case where the only update to a Standard is a non-List of Terms document, or where the Standard does not include a List of Terms document, the existing document-only workflow may still require manual preparation of the applicable Standard/version metadata.
+The principal source files are:
 
-1. If you are not a maintainer of rs.tdwg.org, first fork the [rs.tdwg.org](https://github.com/tdwg/rs.tdwg.org) repository to your account so that you have write access for the changes you make. Clone the forked repository to your local drive.
-2. Create a new working branch of the repository. A name pattern like `ac-changes-2026-02-15` can help you keep track of the branch. The processing scripts operate entirely on the local repository; pushing intermediate commits to GitHub is not required. If you are creating or updating a human-readable document that is not a List of Terms document, prepare the document configuration described in steps 7 and 8 and use the standalone document metadata processor rather than the vocabulary workflow.
-3. There are [generic example spreadsheets](https://github.com/tdwg/rs.tdwg.org/tree/master/process/example-spreadsheets) of hand-edited CSV spreadsheets that can be used as examples and to obtain the appropriate column headers. For more information, see the [instructions for creating a vocabulary](https://github.com/tdwg/rs.tdwg.org/blob/master/process/create-vocabulary.md#user-content-3-details-and-examples). Place the hand-generated namespace CSV files in the appropriate release-specific revision directory under `process`, following the pattern used by existing standards. Unless you are creating a new vocabulary, it is best to start with a hand-generated CSV from a previous revision and delete the data rows so that the correct column headers are retained. When updating existing terms, copy relevant cells from the existing primary metadata CSV file to minimize typographical changes to fields that are not intended to change.
-4. Prepare `config.yaml`. For a new vocabulary, use the [`config.yaml` file](https://github.com/tdwg/rs.tdwg.org/blob/master/process/config.yaml) in the `process` directory as a template. For an existing vocabulary, a recent configuration stored with an earlier revision is generally a better starting point, provided that it contains the current configuration fields.
-5. Enter the general configuration settings and the settings for each namespace participating in the vocabulary processing run. Follow the detailed comments in the YAML file. Each configured namespace must have the expected release input CSV, even if that CSV contains only its header and there are no changes for that namespace. Save the configuration with the release source files for future reference.
-6. Prepare [`vocab.yaml`](https://github.com/tdwg/rs.tdwg.org/blob/master/process/vocab.yaml), which contains metadata about the vocabulary and standard. For an existing vocabulary it will generally not need to change. Changes to existing vocabulary or standard metadata in this file are reflected in the generated metadata, so reuse the most recent applicable configuration unless a metadata change is intentional.
-7. Three YAML configuration files provide information about the human-readable document, often a List of Terms. `general_configuration.yaml` is in the `document_metadata_processing` directory. For the List of Terms document associated with a vocabulary processing run, `process.py` supplies the applicable release information and invokes the document metadata update automatically; the maintainer does not run the document processor separately. For other documents, `general_configuration.yaml` must be prepared for the standalone document-processing workflow.
-8. The other two document configuration files are stored in a subdirectory of `document_metadata_processing` corresponding to the document's permanent IRI. For example, `http://rs.tdwg.org/dwc/doc/list/` corresponds to `dwc_doc_list`. The `authors_configuration.yaml` file supplies author metadata and `document_configuration.yaml` supplies document metadata. Existing files need to be edited only when their source metadata changes; version-specific mutable metadata is generated during processing.
-9. If you are creating a new vocabulary and the hand-edited CSV contains columns for additional properties beyond those required by the Standards Documentation Specification, manually edit the column header mapping file as described in section 3.1.
-10. At this point all source data required for processing should be in place. Making a commit here is RECOMMENDED because it provides a useful Git checkpoint, but the processing architecture no longer requires returning to this commit between iterations.
-11. Run [`process.py`](https://github.com/tdwg/rs.tdwg.org/blob/master/process/process.py) from the `process` directory. The script processes vocabulary metadata, updates term IRI redirect metadata in [`redirects.csv`](https://github.com/tdwg/rs.tdwg.org/blob/master/html/redirects.csv), and updates the metadata for the associated List of Terms document in the same operation.
-12. Before modifying metadata, `process.py` performs preflight validation of the relevant current and historical metadata. Among other checks, it detects ambiguous duplicate current identities, duplicate dated versions, and invalid or ambiguous version histories that would prevent deterministic reconstruction of the release. A preflight failure terminates processing without publishing generated metadata.
-13. `process.py` performs the release processing in a staged temporary workspace. After staged processing succeeds, it verifies that affected working-tree paths have not changed concurrently and then publishes the metadata as a transaction. If publication itself fails, affected paths are rolled back to their pre-run state. The processing log and generated release report are published only after successful metadata publication.
-14. After a successful run, carefully examine the diffs for all changed files and inspect the generated release report in `process/reports/`. If something is wrong with otherwise valid source data, configuration, or persistent membership metadata, correct those inputs on the same working branch and run `process.py` again. Processing is designed to converge on the state represented by the current inputs: an unchanged rerun produces no additional metadata changes, and a corrected rerun replaces the previously generated result with the result corresponding to the corrected inputs. Deleting and recreating the branch is not required.
-15. When the generated metadata is satisfactory, commit the source and derived changes. If the goal is to generate a draft List of Terms document, push the branch to the fork as necessary and use that branch as the source for the Maintenance Group's List of Terms build process. The edit/run/inspect cycle can be repeated on the same branch as the draft evolves.
-16. If you are not a maintainer of rs.tdwg.org and the changes are being submitted to the Executive Committee for ratification, create the appropriate pull request containing the source inputs according to the Maintenance Group's release procedure. After ratification, rs.tdwg.org maintainers should ensure that the configured `date_issued` is the ratification date, run `process.py`, inspect the results, and commit the processed metadata.
-17. After the processed changes are merged to the master branch, term dereferencing for machine-readable metadata can be tested using the rs-test.tdwg.org server. For example, if `http://rs.tdwg.org/eco/terms/protocolNames` was added or modified, `http://rs-test.tdwg.org/eco/terms/protocolNames.rdf` should return RDF/XML containing the changes. There can be a delay between merging changes and their appearance on the test server.
-18. After testing, inform the Maintenance Group that the final metadata are available so that the authoritative List of Terms can be published on the standard's website. A new release of the rs.tdwg.org repository triggers deployment to the production server. Ideally, publication of the List of Terms precedes or coincides with that release so that redirects for new terms resolve to valid fragment identifiers. Server deployment and front-end caching can introduce additional delay before changes are visible.
+- `document_configuration.yaml`, which contains Document metadata; and
+- `authors_configuration.yaml`, when author/contributor-role metadata is supplied or changed.
 
+### Vocabulary-associated Lists-of-Terms Documents
 
-## 3.1 Modifying the column header mapping file
+The List-of-Terms Document identified by each Vocabulary's `list_of_terms_iri` is managed automatically as part of Vocabulary processing. The maintainer does not invoke the Document updater separately for it. A new List-of-Terms Document version is created when the Vocabulary release state requires the human-readable Document metadata to advance.
 
-Because the SDS requires particular properties to be included in term metadata, if the template hand-generated CSV file is used without editing the column headers, a template column header mapping file can be used as well. The column header mapping file only needs to be modified if additional property columns are added to the template CSV file. This may happen if specialty properties are added to the required properties.
+### Other configured Documents
 
-Controlled vocabularies contain one or more additional properties that are not found in vocabularies that define properties and classes. That includes the controlled value string and may also include a property to indicate that a value has a `broader` relationship to another concept. So controlled vocabularies should use one of the template column header mapping files designed for controlled vocabularies. Setting the value of `vocab_type` in the configuration section determines whether the mapping template includes mappings for these extra term columns or not. See section 2.1.1 for details.
+For Documents in `config.yaml` that are not Vocabulary-associated Lists of Terms, `doc_modified` in `document_configuration.yaml` is the explicit release-change signal:
 
-If additional property columns were added to the hand-generated CSV file, the mapping file in the current terms directory for that term list (i.e. the directory created having the name set as the value of `database` in the configuration section) must be manually edited. The name of the mapping file ends in `-mappings.csv`. 
+- if `doc_modified` is earlier than `date_issued`, the existing Document version is carried forward unchanged;
+- if `doc_modified` equals `date_issued`, the Document is processed and a target-date version is created unless that version already exists; and
+- if `doc_modified` is later than `date_issued`, processing fails because that future state cannot belong to the target release.
 
-The order of rows in the mapping file does not matter. The first column (`header`) contains the name of the column header in the hand-generated CSV file. The second column (`predicate`) contains the abbreviated IRI (also known as [CURIE](https://www.w3.org/TR/curie/) or [QName](https://www.w3.org/2001/tag/doc/qnameids)). If the namespace abbreviation of an added row is different from others already present in this column, check the `namespace.csv` file in the same directory to make sure that the abbreviation is already listed. If not, add it to that list of namespace abbreviations and IRIs. The third column, which describes the type of the value in the column, MUST have one of the following strings as its value: `iri`, `language`, `datatype`, or `plain`. For language-tagged strings, the `attribute` column contains the ISO 639-1 language code used in the tag. For strings having a `datatype`, the `attribute` column contains the abbreviated IRI for the datatype. If the column in the CSV file contains an unabbreviated full IRI, there is no value in the `value` column of the mapping table. If the column in the CSV contains the local name part of the IRI, the `value` column contains full namespace IRI to be prepended to the value from column in the CSV. 
+A new configured Document must have an applicable `document_configuration.yaml` so that its first current and versioned metadata can be created.
 
-It is also possible to generate a fixed value for all rows in the CSV table. See [this page](https://github.com/baskaufs/guid-o-matic/blob/master/use.md#recording-the-column-mappings-from--the-metadata-table-to-rdf-triples) for more details on the format of the mapping file. 
+`general_configuration.yaml` is runtime input to the reusable Document updater. During `process.py`, it is populated for the Document being processed and restored afterward; maintainers do not edit it as part of the release workflow.
 
-## 3.2 Legacy notebooks and term deprecations
+See [4.5](#45-document-metadata).
 
-There are two Python scripts in Jupyter notebooks that were used to develop the script and formerly used to do the processing. They are no longer maintained, but contain a lot of comments that might help in understanding what the script does. They may also be useable for term deprecations. They are:
+## 3.5 Run the processor
 
-1. The [simplified processing script](simplified_process_rs_tdwg_org.ipynb) presupposes no knowledge of Python and will work for most term additions and changes in existing standards and for creating simple vocabularies or term lists, including controlled vocabularies. **You MUST NOT use this script for term deprecations.**
-2. Because this script is not designed for use by the general public, it has limited error trapping. In cases where results are not as expected, or where unusual changes such as term deprecations are required, the [full processing script](process_rs_tdwg_org.ipynb) SHOULD be used. This script contains the same code as the simplified script, but separates the code among more cells and provides more feedback in the form of print statements. **Note on 2024-03-01: Since this script was written, the processing script has been significantly modified. You should not assume that the full processing script notebook is usable without modification.**
+From the repository's `process` directory, run:
 
-We really should not be deprecating terms anyway, so there should be only rare cases where using the full processing script is necessary.
+```bash
+python process.py
+```
 
-# 4 Build script for a human readable List of Terms document
+The outer invocation does not write release metadata directly into the working repository. Instead it:
 
-**NOTE:** Since this section was originally written, the build scripts used by Audiovisual Core and Darwin Core (based originally on the scripts linked here) have been greatly modified to make it possible for language variants of the List of Terms documents to be generated in concert with the CrowdIn translation system. The material in this section has been left here for historical reasons, but any Maintenance Group creating a new build script of their List of Terms should base it off of one of the existing build scripts currently in use by one of the Maintenance Groups. As of 2026-03-17, the Audiovisual and Darwin Core scripts are nearly identical and support the CrowdIn system. The TCS build script has different source code, and supports building term metadata (not yet document metadata) from rs.tdwg.org, but at this point does not support CrowdIn. The Latimer Core build script has completely different source code and I think generates HTML directly (not Markdown), so what is described in the workflow regarding rendering of draft Markdown does not apply. I'm not sure exactly how the data are sourced and CrowdIn isn't currently supported. 
+1. copies the repository, excluding Git internals, Python caches, prior logs, and prior reports, to a temporary workspace;
+2. runs the complete processor in that staged repository;
+3. performs release preflight validation before release metadata is generated;
+4. completes all processing in staging;
+5. compares the staged repository with the state copied at the start of the run;
+6. verifies that paths to be published were not changed concurrently in the real working tree;
+7. publishes the staged metadata delta to the working repository; and
+8. publishes the processing log and release report only after metadata publication succeeds.
 
-A document listing terms and their metadata (a "List of Terms" document) is a Markdown document consisting of two or more parts. The first part is a hand-edited template file that contains the introductory material (header section, introduction, RFC 2119 keywords section, etc.). The second part is created by a script that generates the actual list of terms from the current terms files for term lists that are included in the listing. The script is relatively simple if all terms are found in a single term list. It is more complex if the vocabulary includes terms from several term lists or if the terms are categorized. There are two example build scripts that can be modified by a Python programmer if modifications are needed to make the term list document conform to the idiosyncrasies of a given vocabulary.
+If staged processing fails, no generated metadata from that run is published to the caller's working tree. If publication itself fails after some files have been replaced, the publication layer attempts to restore all affected paths to their pre-publication state.
 
-## 4.1 Building a simple term list
+### Preflight validation
 
-The notebook `build-page-simple.ipynb` in the `process/page_build_scripts` directory of the rs.tdwg.org repository has an example set up for a controlled vocabulary with hierarchy. That directory also has a template Markdown file for the introductory section that can be modified as necessary.
+Preflight checks include release/configuration structure, required namespace input CSVs, duplicate current identities, duplicate dated resource versions, ambiguous historical resource/date combinations, invalid historical dates, `new_term_list` consistency, and the existence/shape of metadata tables required for existing Term Lists. The intent is to reject histories that cannot be interpreted deterministically rather than resolving them by CSV row order or URI-string heuristics.
 
-## 4.2 Categorizing terms
+## 3.6 Review the generated release
 
-It is reasonable to include the few terms of a simple vocabulary in a single section. However, documents listing the terms of larger and more complicated vocabularies may need to be organized into categories to make it easier to locate related terms. This approach was first used with Darwin Core and has also been adopted by Audubon Core. 
+A successful run is not the end of review. Inspect both the operational outputs and the repository diff.
 
-The key to organizing the terms in this way is by using the property `tdwgutility:organizedInClass` where the value is a class under which the subject is organized. NOTE: the local name of this property should not mislead users to think that grouping property terms in this way indicates that the grouped properties have been declared to have the organizing class as a domain. TDWG-minted terms SHOULD NOT have ranges or domains as part of their basic metadata.
+Useful commands from the repository root are:
 
-In many cases, the organizing class will be a well-known class previously defined by TDWG or some other organization. Examples in Darwin Core are `dwc:Occurrence` and `dcterms:Location`. However, it is also possible to create a "convenience" class within the `tdwgutility:` namespace solely for the purpose of organizing related terms. For example, Audubon Core uses the class `tdwgutility:ResourceCreation` to group property terms related to the creation of multimedia resources. Terms in the `tdwgutility:` namespace are not generally governed by any standard, so organizational class terms can be added as necessary without going through any official change process.
+```bash
+git diff --check
+git status --short
+git diff --stat
+git diff
+```
 
-### 4.2.1 Using categories
+Also inspect:
 
-In order to use categories, edit the configuration section of the build script so that the value of `organized_in_categories` is `True`. Then create Python lists containing corresponding values for `display_order`, `display_labels`, `display_commnets`, and `display_id`. When the script builds the page, it will use these data to organize the terms and create appropriate section headings and notes for the categories. See the notebook `build-page-categories.ipynb` in the `process/page_build_scripts` directory of the rs.tdwg.org repository for an example.
+- `process/reports/release-report-YYYY-MM-DD.md`;
+- `process/logs/process-YYYY-MM-DD.log`; and
+- the console summary produced during processing.
 
-# 5 Generating JSON-LD for controlled vocabularies
+The log and report are operational review outputs rather than authoritative metadata. They are published after the metadata transaction succeeds and are normally excluded from the repository metadata transaction itself.
 
-**NOTE:** As of 2026-03-17, making translations of Darwin Core and Audiovisual Core controlled vocabularies is being handled by the CrowdIn system, which commits translated CSV metadata files to rs.tdwg.org . The Audiovisual Core subjectPart and subjectOrientation controlled vocabularies are available in translation as JSON-LD as described below. However, it is unlikely that this will be maintained in the future. 
+For a substantive review, confirm that:
 
-In order to make controlled vocabularies as widely available as possible, multi-lingual translations of the term labels and definitions should be made available in as many languages as possible. A Python script (build-json-ld.ipynb) to generate JSON-LD is available in the `cv_json_ld` directory. It can be run from any location, so maintenance groups should use it to generate JSON-LD representations of their controlled vocabularies on their own sites. This JSON-LD can then be used by developers to create multilingual tools to make it easier for users to select the right concept and acquire the controlled value string or IRI associated with that concept.
+- only intended terms received new versions;
+- each changed Term List has the intended complete target-date membership;
+- current Term List-to-Vocabulary ownership matches `config.yaml`;
+- each target Vocabulary snapshot contains the correct applicable Term List versions;
+- current Standard composition matches the configured Vocabularies and Documents;
+- the target Standard version contains the correct applicable versions of all configured parts;
+- only Documents intended to change received target-date versions;
+- configured namespace redirects match the intended human-readable destinations;
+- the Executive Committee decision and affected-resource links are correct; and
+- unchanged resources were not spuriously re-versioned.
 
-Because the JSON-LD can easily be ingested, it can also be used to build multilingual web applications. Some Javascript code and an HTML file for a simple web page is also available in the directory. To see the page in action, visit [this page](https://heardlibrary.github.io/digital-scholarship/lod/json_ld_test/display-cv.html). NOTE on 2024-03-04, the management of translations documentation is still being worked out.
+Section [4](#4-what-processpy-modifies) identifies the principal metadata tables involved in these checks.
 
-# 6 Reference
+## 3.7 Correct and rerun
 
-## 6.1 Standards hierarchy
+If the generated result is wrong because the source CSVs, `config.yaml`, Document configuration, or persistent current-membership declarations are wrong, correct the authoritative input and run `process.py` again on the same working branch.
 
-The TDWG standards hierarchy organizes resources at four major levels: standards, vocabularies, term lists, and terms. The hierarchy is shown in the diagram below. 
+The processor is designed to be deterministic and same-release idempotent. In particular:
 
-![TDWG metadata model](https://raw.githubusercontent.com/tdwg/vocab/master/tdwg-standards-hierarchy-2017-01-23.png)
+- an unchanged rerun should create no additional repository metadata changes;
+- generated identities are reconciled rather than duplicated;
+- current containment is reconciled from configuration; and
+- target Vocabulary and Standard membership snapshots are reconstructed from current membership and applicable dated child versions.
 
-Ratification of a term addition or change triggers new versions at all of the higher levels in the standards hierarchy. New term versions trigger new term list versions. New term list versions trigger new vocabulary versions and new vocabulary versions trigger new standards versions. For more information about versioning of TDWG standards, see [Section 2.3 of the TDWG Standards Documentation Specification](http://rs.tdwg.org/sds/doc/specification/).
+Deleting and recreating a processing branch between iterations is therefore not part of the normal workflow.
 
-## 6.2 Term versions
+If you want an explicit idempotence check during processor development, capture a file-hash manifest of the processed repository (excluding `.git`, `__pycache__`, `process/logs`, and `process/reports`), rerun `process.py`, and verify that the manifest is unchanged.
 
-Each current term is related to at least one term version. If a current term is new, its record is created and the last-modified date is set to be the same as the created date. A dated version is also created for the current term, with an issued date that is the same as the last-modified date of the current term.
+## 3.8 Commit, publish, and test
 
-![TDWG versions model](https://github.com/tdwg/vocab/raw/master/graphics/version-model.png)
+When the generated metadata is satisfactory:
 
-Each time a term's metadata is revised, a new version is created. The term version IRI is formed by appending the date of issue to the term local name. A `hasVersion` relationship is created between the term and its version, and the new version has a `replaces` relationship with the previous version. The metadata defining these relationships are generated by the processing script. Other properties such as the definition, usage, and notes are copied from the hand-generated CSV file edited by the creators/maintainers.
+1. commit the release source inputs, configuration changes, and generated authoritative metadata;
+2. submit or merge the branch according to the applicable TDWG maintenance and ratification procedure;
+3. test machine-readable dereferencing through the TDWG test infrastructure when applicable; and
+4. coordinate publication of the human-readable List-of-Terms or other standard documents so that term redirects resolve to valid fragment identifiers when the production release goes live.
 
-## 6.3 Assignment of term versions to a new term list version
+For example, after merge, a changed term such as `http://rs.tdwg.org/eco/terms/protocolNames` can be checked through the corresponding `rs-test.tdwg.org` representation before production deployment. Deployment and front-end caching can introduce delays.
 
-A term list is a group of related terms that share the same namespace part of their IRI. As with all TDWG resources, term lists also have versions. When a term is changed or added, the new term version is added to a new version of the term list (replacing any older version if necessary). If a term is new, it is also added to the existing term list. 
+A repository release of `rs.tdwg.org` triggers production deployment according to the infrastructure release procedure.
 
-## 6.4 Proliferation of new versions up the hierarchy
+## 3.9 Generating drafts
 
-A term change can require new versions at each applicable level of the hierarchy: Term, Term List, Vocabulary, and Standard. However, the processing script does not construct a new Vocabulary or Standard version merely by copying the previous version and substituting the changed child resource. Instead, it reconstructs the complete target-date snapshot from the persistent current-membership tables described in section 7.
+The same workflow can be used before ratification in a fork or draft branch. Draft processing is useful for proofreading metadata, generating candidate List-of-Terms documents, review by a Maintenance Group, and preparation for Executive Committee consideration.
 
-For each declared member of a Vocabulary, the processor resolves the Term List version that applies on the release date: a version issued on the release date is used when one exists; otherwise the latest prior version is carried forward. The same principle is used for the parts of a Standard. Thus unchanged Term Lists, Vocabularies, and Documents can be incorporated by reference to versions issued before the current release date. A membership change by itself can also require a new parent version even when no term metadata changed.
+The normal draft cycle is:
 
-This distinction is important because the dated membership tables are historical snapshots, not the source of truth for current containment. Current containment is declared separately, and each new Vocabulary or Standard version is expected to be a complete snapshot of the membership that applies to that release.
+1. edit the release CSV/YAML inputs;
+2. run `process.py`;
+3. inspect the generated metadata and build downstream draft documents;
+4. correct the inputs; and
+5. rerun on the same branch.
 
-# 7 Metadata membership and version snapshots
+When the draft is finalized, preserve the release inputs in the normal review/ratification workflow. After ratification, ensure that `date_issued` is the actual release/ratification date and process the final release from the appropriate pre-release repository state.
 
-The rs.tdwg.org metadata distinguishes between **current membership declarations** and **membership of dated versions**. This distinction is important for understanding both the data model and the behavior of `process.py`.
+## 3.10 New Term Lists and column-header mappings
 
-Current membership tables state which resources are presently members or parts of higher-level resources. Dated membership tables record the complete membership of a particular version at a particular point in time. The current tables are therefore persistent configuration/state used to construct new snapshots; the dated tables are historical records and should not be treated as templates whose omissions are automatically inherited by later releases.
+When a new Term List is created, `process.py` creates its basic current-term and term-version dataset infrastructure from templates. The configured `vocab_type` selects the appropriate mapping template for simple vocabularies or controlled vocabularies.
 
-## 7.1 Term membership and versions
+If the release-input CSV contains additional property columns beyond those represented by the selected template, the generated column mapping file for the current-term dataset must be edited so that each source column maps to the intended RDF predicate and value type.
 
-Current terms and their dated versions are stored in the database directory configured for each Term List. The processing script maintains the current term records, dated term-version records, and the join metadata relating current terms to their versions. A new or changed term can cause a new Term List version to be generated.
+The mapping file is in the current-term dataset directory and normally ends in `-mappings.csv`. Its principal fields identify:
 
-The membership of a dated Term List version records the applicable version of every term in that Term List. Unchanged terms are represented by carrying forward their latest applicable earlier term versions rather than by creating unnecessary new term versions.
+- the source column header;
+- the predicate/CURIE;
+- the value type (`iri`, `language`, `datatype`, or `plain`);
+- an optional language or datatype attribute; and
+- an optional fixed or prepended namespace value.
 
-## 7.2 Vocabulary membership
+If a newly used namespace prefix is not already present in the dataset's `namespace.csv`, add it there as well.
 
-Current Term List membership in a Vocabulary is stored in:
+For more background on the mapping format, see [guid-o-matic mapping documentation](https://github.com/baskaufs/guid-o-matic/blob/master/use.md#recording-the-column-mappings-from--the-metadata-table-to-rdf-triples).
+
+## 3.11 Legacy notebooks and term deprecations
+
+The Jupyter notebooks `simplified_process_rs_tdwg_org.ipynb` and `process_rs_tdwg_org.ipynb` record historical development of the processor. They are no longer the authoritative implementation and MUST NOT be substituted for the current `process.py` release workflow.
+
+They may still be useful for understanding historical behavior, but the current processor has diverged substantially through release-level configuration, preflight validation, transaction handling, deterministic version selection, complete snapshot reconstruction, Document integration, redirect reconciliation, and same-release idempotence.
+
+Term deprecation is not supported by the ordinary workflow described in this document. A proposed deprecation should be treated as an exceptional maintenance operation requiring explicit analysis of the affected current and historical metadata before changes are made. Do not assume that an old notebook can be run unchanged to perform a safe deprecation.
+
+# 4 What `process.py` modifies
+
+This section describes the principal metadata consequences of a successful release run. It is intended both as implementation documentation and as a review checklist.
+
+## 4.1 Terms and term versions
+
+For each namespace input row, the processor determines whether the term is new or modified relative to current and historical metadata.
+
+For TDWG-minted, non-utility namespaces, a new or modified term receives a dated term-version record. For a modified term, the latest unambiguous version issued before the target release is selected as its predecessor and is marked superseded; the target-date version is recommended. Current term metadata is updated in place, while genuinely new terms are added to the current-term dataset.
+
+Borrowed and utility namespaces do not use the same TDWG term-version mechanism. Their applicable current metadata are updated according to their configured processing mode.
+
+The processor also maintains the current-term-to-version join metadata and applicable replacement relationships. Same-release reruns reconcile stable identities rather than appending duplicate versions or self-replacement assertions.
+
+## 4.2 Term Lists and Term List versions
+
+A Term List changes when it has term changes, is genuinely new, or its configured Term List-level metadata changes.
+
+The processor maintains:
+
+- `term-lists/term-lists.csv` for current Term List metadata;
+- `term-lists/term-lists-members.csv` for current term membership;
+- `term-lists/term-lists-versions.csv` for current-to-version joins;
+- `term-lists-versions/term-lists-versions.csv` for dated Term List versions;
+- `term-lists-versions/term-lists-versions-members.csv` for complete dated membership snapshots; and
+- `term-lists-versions/term-lists-versions-replacements.csv` for version replacement relationships.
+
+For an existing TDWG Term List, the new target-date membership snapshot starts from the latest predecessor membership and replaces the version of each modified term while adding versions of genuinely new terms. The processor validates that the predecessor contains at most one version for each term and that a term classified as new was not already present.
+
+A header-only namespace CSV does not by itself create a new Term List version. However, a Term List can still receive a new version if its configured Term List-level metadata changes.
+
+## 4.3 Vocabularies and Vocabulary-version snapshots
+
+Current Term List membership in Vocabularies is maintained in:
 
 `vocabularies/vocabularies-members.csv`
 
-Each row declares that a current Term List is a member of a current Vocabulary. This table is the authoritative source used by `process.py` when reconstructing the membership of a new Vocabulary version.
+The configured Vocabulary/namespace hierarchy in `config.yaml` is authoritative for current ownership. During processing, a configured Term List is removed from any prior Vocabulary owner and associated with its configured Vocabulary. This allows containment changes even when the Term List itself has no term changes.
 
-Vocabulary versions are recorded in:
+If a Vocabulary loses its Term Lists through such transfers and has no current Term List members remaining, it is treated as retired for version-status purposes: its existing versions through the target date are superseded, but the current Vocabulary identity and historical Vocabulary/version records are retained. No artificial target-date Vocabulary version is minted merely to express retirement.
 
-`vocabularies-versions/vocabularies-versions.csv`
+When a target Vocabulary version is required, its membership is constructed as a **complete snapshot** of the Term Lists currently declared for that Vocabulary. Each current Term List identity is resolved to the applicable Term List version on the release date: a target-date version is used when one exists; otherwise the latest unambiguous earlier version is carried forward.
 
-The complete Term List membership of each dated Vocabulary version is stored in:
+The relevant dated tables include:
 
-`vocabularies-versions/vocabularies-versions-members.csv`
+- `vocabularies-versions/vocabularies-versions.csv`;
+- `vocabularies-versions/vocabularies-versions-members.csv`; and
+- `vocabularies-versions/vocabularies-versions-replacements.csv`.
 
-When a target Vocabulary version is generated, `process.py` resolves every Term List declared in `vocabularies-members.csv` to the applicable Term List version on the release date. If a Term List has a version issued on the target date, that version is used; otherwise its latest unambiguous version issued before the target date is carried forward. The target Vocabulary membership rows are then written as a complete snapshot and checked against the declared current membership.
+Historical Vocabulary-version membership is not rewritten merely because current containment changes.
 
-This means that a Term List can become a member of a Vocabulary even if none of its terms changes in that release. Conversely, removing a Term List from `vocabularies-members.csv` means that it is not included in newly reconstructed Vocabulary versions, while historical Vocabulary versions continue to retain their recorded historical membership.
+## 4.4 Standard composition and Standard-version snapshots
 
-## 7.3 Standard membership
-
-Current parts of a Standard are stored in:
+Current direct Standard composition is maintained in:
 
 `standards/standards-parts.csv`
 
-This table declares the resources that are presently parts of each Standard. Parts can include Vocabularies and Documents.
+For the configured Standard, `process.py` reconciles this table to exactly the Vocabularies and Documents declared by the current `config.yaml`. Vocabulary parts are recorded as `tdwgutility:Vocabulary`; Document parts are recorded as `foaf:Document`.
 
-Standard versions are recorded in:
-
-`standards-versions/standards-versions.csv`
-
-The complete parts of each dated Standard version are stored in:
+The target Standard-version snapshot is maintained in:
 
 `standards-versions/standards-versions-parts.csv`
 
-When a target Standard version is generated, `process.py` resolves each resource declared in `standards-parts.csv` to the applicable version on the release date. For a Vocabulary, the applicable version is resolved from the Vocabulary-version metadata. For a Document, the applicable version is resolved from the document-version metadata. A target-date version is used when one exists; otherwise the latest unambiguous prior version is carried forward. The resulting rows constitute the complete snapshot of the Standard at that version.
+Each configured Vocabulary and Document is resolved to the latest applicable version on or before the target release date. A target-date version is used when it exists; otherwise the latest unambiguous prior version is carried forward. The resulting rows are the complete composition snapshot of that Standard version.
 
-Removing a current Vocabulary or Document from `standards-parts.csv` therefore prevents it from being included in newly reconstructed Standard versions, but does not alter historical Standard snapshots in `standards-versions-parts.csv`.
+Historical Standard-version snapshots remain historical evidence and are not rewritten simply because current composition changes.
 
-## 7.4 Why current membership and historical snapshots are separate
+Standard current/version metadata and replacement relationships are maintained in the corresponding `standards/` and `standards-versions/` tables.
 
-Separating current membership from historical version membership serves two different purposes:
+## 4.5 Document metadata
 
-- the current membership tables express what belongs to a Vocabulary or Standard now and provide the authoritative containment input for the next release;
-- the dated membership tables preserve what belonged to each particular historical version.
+Document metadata are maintained in the `docs/`, `docs-versions/`, and `docs-roles/` tables by the reusable Document updater invoked from `process.py`.
 
-The processor validates histories sufficiently to resolve each declared member to one applicable version. Ambiguous duplicate identities or duplicate versions for the same resource and date are treated as errors rather than resolved by row order or other incidental properties of the CSV files.
+For a changed existing Document, processing normally:
 
-This reconstruction model also prevents an omission in an older dated snapshot from automatically propagating into a new release. A new Vocabulary or Standard version is derived from the authoritative current membership declarations and the applicable dated versions of those members, not from the membership rows of its predecessor.
+- creates the target-date Document version;
+- updates current Document metadata where configured;
+- records target version authors/formats;
+- archives the immediately preceding version's redirect/access information when necessary; and
+- records the target-version-to-predecessor replacement relationship.
 
-## 7.5 Processing log and release report
+For a genuinely new Document, the current Document and its first version are created.
 
-A successful vocabulary-processing run writes an operational log under `process/logs/` and a Markdown release report under `process/reports/`. These files are intentionally outside the metadata transaction itself. They are generated in the staged workspace and are published to the working repository only after the metadata transaction succeeds.
+Unchanged non-List-of-Terms Documents are not reprocessed merely because they are listed as parts of the Standard. Their prior applicable versions are carried into the target Standard-version snapshot by reference.
 
-The release report summarizes the resulting Standard, Vocabulary, and Term List composition and compares it with the immediately preceding versions. It is intended to support review of a proposed release and can be adapted for use as a GitHub Release description after ratification. It does not replace inspection of the generated metadata diffs.
+The Document updater preserves stable row/scope ordering on same-release reruns so that a semantically unchanged rerun is also byte-stable.
 
+## 4.6 Human-readable term redirects
+
+Current dereferencing rules for term and term-version datasets are maintained in:
+
+`html/redirects.csv`
+
+Redirect metadata is reconciled from each namespace's configuration **whether or not that namespace has term changes in the release**. This is important because redirect behavior is current infrastructure state, not a side effect of minting a new Term List version.
+
+Vocabulary maintainers MUST ensure that the fragment identifiers generated in the human-readable List-of-Terms document follow the pattern declared by `prepend_url`, `use_namespace_in_fragment`, and `separator` in `config.yaml`.
+
+For example, a Darwin Core redirect may map `http://rs.tdwg.org/dwc/terms/recordedBy` to `https://dwc.tdwg.org/list/#dwc_recordedBy`.
+
+## 4.7 Executive Committee decision metadata
+
+The release decision identity is derived from `date_issued` and `decision_number`. The processor maintains:
+
+- `decisions/decisions.csv`; and
+- `decisions/decisions-links.csv`.
+
+A release decision is added once and reused on same-release reruns if its configured metadata agrees. Changed term IRIs are linked to the decision as affected resources, and duplicate relationship rows are suppressed.
+
+## 4.8 Version status and dataset-index metadata
+
+After resource-level processing, version statuses are reconciled from resource identity and release chronology. This ensures that same-release reruns reconstruct the intended recommended/superseded state rather than depending on incidental starting status.
+
+The processor also updates `index/index-datasets.csv` modification metadata for metadata datasets actually affected at the corresponding resource level.
+
+## 4.9 Processing log and release report
+
+A successful run writes:
+
+- `process/logs/process-YYYY-MM-DD.log`; and
+- `process/reports/release-report-YYYY-MM-DD.md`.
+
+These are generated in staging and published only after the metadata transaction succeeds. The log records namespace-level actions and created/modified files. The release report summarizes the resulting Standard, Vocabulary, and Term List release composition and is suitable as a review aid or starting point for a GitHub Release description.
+
+Neither replaces review of the authoritative repository diff.
+
+# 5 Building a human-readable List of Terms document
+
+`process.py` updates the authoritative metadata and the metadata record for a Vocabulary-associated List-of-Terms Document, but it does not build the human-readable List-of-Terms content itself. That build remains a Maintenance Group responsibility.
+
+The build process SHOULD use authoritative current metadata from `rs.tdwg.org` together with the applicable Document configuration so that human-readable and machine-readable representations remain consistent.
+
+The Darwin Core and Audiovisual Core build systems have evolved substantially from the older example notebooks in this repository and support translation workflows. A Maintenance Group creating or modernizing a build system should therefore use a currently maintained standard build as its starting point rather than assume that historical `page_build_scripts` examples represent current best practice.
+
+A List-of-Terms build commonly combines:
+
+- hand-maintained introductory/document text;
+- authoritative current term metadata for one or more Term Lists;
+- Document metadata; and
+- standard-specific organization rules such as grouping properties under display categories.
+
+Where `tdwgutility:organizedInClass` is used for presentation grouping, it is an organizational relationship and does not imply an RDF domain declaration for the grouped property.
+
+# 6 Generating JSON-LD for controlled vocabularies
+
+Generation of multilingual JSON-LD for controlled vocabularies is ancillary to the `rs.tdwg.org` release processor. Translation workflows for actively maintained standards may instead be integrated with systems such as CrowdIn and standard-specific build pipelines.
+
+Historical tooling for JSON-LD generation remains under `cv_json_ld`, but maintainers should verify that it is still appropriate for the standard and translation workflow before relying on it for a new release.
+
+# 7 Reference
+
+## 7.1 Standards hierarchy
+
+The TDWG metadata model organizes relevant resources at the levels of Standards, Vocabularies, Term Lists, Terms, and their dated versions.
+
+![TDWG metadata model](https://raw.githubusercontent.com/tdwg/vocab/master/tdwg-standards-hierarchy-2017-01-23.png)
+
+A change at a lower level can require a new version at higher levels. However, the current processor distinguishes **resource change** from **containment change**. A Vocabulary or Standard version can be required because its membership/composition changed even when no child term metadata changed.
+
+## 7.2 Current membership versus dated snapshots
+
+The metadata distinguishes between current containment declarations and dated historical snapshots.
+
+Current tables answer questions such as:
+
+- Which terms are currently in this Term List?
+- Which Term Lists currently belong to this Vocabulary?
+- Which Vocabularies and Documents currently belong directly to this Standard?
+
+Dated membership tables answer a different question: what was the complete membership of a particular dated resource version?
+
+For Vocabularies and Standards, the current containment declarations are authoritative inputs to the next release. Historical membership snapshots are preserved but are not copied forward as the source of current membership.
+
+## 7.3 Applicable version selection
+
+When constructing a dated parent snapshot, the processor resolves each declared current child identity to one applicable dated version:
+
+- if exactly one version exists on the target release date, that version is used;
+- otherwise the latest unambiguous version issued before the target date is carried forward.
+
+Ambiguous duplicate identities or duplicate versions for the same resource/date are errors. The processor does not resolve ambiguity by row order.
+
+For modified terms, predecessor selection follows the same chronology principle: the latest version issued strictly before the target release is the predecessor.
+
+## 7.4 Determinism and same-release idempotence
+
+Release metadata timestamps generated by the processor are derived deterministically from the release date and configured UTC offset rather than the wall-clock time at which the script happens to run.
+
+Stable resource identities and relationship rows are reconciled so that a same-release rerun does not append duplicate versions, memberships, replacement assertions, decision links, or Document metadata scopes.
+
+The intended invariant is:
+
+> Given the same repository state and release inputs, processing the same release again produces no repository metadata changes.
+
+This property makes source correction and rerunning on the same branch a supported maintenance workflow rather than requiring reconstruction from a pre-processing branch after every iteration.
