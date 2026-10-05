@@ -1139,49 +1139,6 @@ def generate_current_terms_metadata(standardUri, terms_metadata, modifications_m
     # save as a file
     writeCsv('../term-lists-versions/term-lists-versions.csv', term_lists_versions_metadata)
 
-    # -----------------
-    # Code added 2024-03-03 to update the redirects file that controls redirects for current terms for this namespace.
-    # The redirect record is in the repo_path + 'html/redirects.csv' file.
-
-    redirects_df = pd.read_csv('../html/redirects.csv', dtype=str)
-    
-    # Create a row for namespace redirect
-    if use_namespace_in_fragment:
-        use_namespace = 'yes'
-        connector = separator
-    else:
-        use_namespace = 'no'
-        connector = ''
-    term_redirects_row_data = {'database': database, 'redirect': 'yes', 'type': 'term', 'namespace': pref_namespace_prefix, 'prefix': prepend_url, 'useNamespace': use_namespace, 'connector': connector}
-
-    # Find the row index for the namespace redirect in the pandas dataframe and replace it with the new data.
-    # If the row is not found, add it to the end of the pandasdataframe.
-    matching_rows_index = redirects_df[redirects_df['database'] == database].index
-    if len(matching_rows_index) > 1:
-        report('Error: multiple namespace redirects found in redirects.csv.')
-        sys.exit()
-    elif len(matching_rows_index) == 1:
-        # replace the row with the new data
-        redirects_df.loc[matching_rows_index[0]] = term_redirects_row_data
-    else:
-        # add the row to the end of the dataframe
-        redirects_df = pd.concat([redirects_df, pd.DataFrame([term_redirects_row_data])])
-
-    # Create row for term version redirect
-    version_redirects_row_data = {'database': database + '-versions', 'redirect': 'no', 'type': 'termVersion', 'namespace': pref_namespace_prefix, 'prefix': '', 'useNamespace': '', 'connector': ''}
-    matching_rows_index = redirects_df[redirects_df['database'] == database + '-versions'].index
-    if len(matching_rows_index) > 1:
-        report('Error: multiple term-version redirects found in redirects.csv.')
-        sys.exit()
-    elif len(matching_rows_index) == 1:
-        # replace the row with the new data
-        redirects_df.loc[matching_rows_index[0]] = version_redirects_row_data
-    else:
-        # add the row to the end of the dataframe
-        redirects_df = pd.concat([redirects_df, pd.DataFrame([version_redirects_row_data])])
-
-    redirects_df.to_csv('../html/redirects.csv', index = False)
-
     return version_uri, aNewTermList, term_lists_versions_members, term_lists_versions_metadata, mostRecentListNumber, termlistVersionUri, term_lists_versions_replacements, term_lists_table, term_list_rowNumber
 
 # This function contains the Step 6 cell from the development Jupyter notebook simplified_process_rs_tdwg_org.ipynb
@@ -2596,40 +2553,26 @@ def reconcile_configured_containment():
             configured_term_lists.append(term_list_uri)
 
     for term_list_uri in configured_term_lists:
-        matching_rows = [
-            row for row in vocabulary_members[1:]
-            if row[1] == term_list_uri
-        ]
         configured_matches = [
-            row for row in matching_rows
-            if row[0] == vocabularyIri
+            row for row in vocabulary_members[1:]
+            if row[0] == vocabularyIri and row[1] == term_list_uri
         ]
-
         if len(configured_matches) > 1:
             raise ValueError(
                 'Vocabulary ' + vocabularyIri + ' contains duplicate current '
                 'membership for Term List ' + term_list_uri + '.'
             )
 
-        # Configuration declares the current containing Vocabulary for this
-        # Term List. If the Term List was previously contained by another
-        # Vocabulary, transfer current containment without altering historical
-        # Vocabulary-version membership snapshots.
         previous_owners = {
-            row[0] for row in matching_rows
-            if row[0] != vocabularyIri
+            row[0] for row in vocabulary_members[1:]
+            if row[1] == term_list_uri and row[0] != vocabularyIri
         }
         if previous_owners:
-            vocabulary_members = [
-                vocabulary_members[0]
-            ] + [
-                row for row in vocabulary_members[1:]
-                if not (
-                    row[1] == term_list_uri and
-                    row[0] != vocabularyIri
-                )
-            ]
             displaced_vocabulary_iris.update(previous_owners)
+            vocabulary_members = [vocabulary_members[0]] + [
+                row for row in vocabulary_members[1:]
+                if not (row[1] == term_list_uri and row[0] != vocabularyIri)
+            ]
             vocabulary_membership_changed = True
 
         if not configured_matches:
@@ -2666,6 +2609,91 @@ def reconcile_configured_containment():
         standard_membership_changed,
         displaced_vocabulary_iris,
     )
+
+
+def reconcile_namespace_redirect(namespace):
+    """Make current term and term-version redirects match namespace config.
+
+    Redirect metadata describes current dereferencing behavior for a configured
+    namespace. It must therefore be reconciled from configuration whether or not
+    the Term List receives a new version in this release.
+    """
+    redirects_path = '../html/redirects.csv'
+    table = readCsv(redirects_path)
+    header = table[0]
+
+    if namespace['use_namespace_in_fragment']:
+        use_namespace = 'yes'
+        connector = namespace['separator']
+    else:
+        use_namespace = 'no'
+        connector = ''
+
+    expected_rows = [
+        {
+            'database': namespace['database'],
+            'redirect': 'yes',
+            'type': 'term',
+            'namespace': namespace['pref_namespace_prefix'],
+            'prefix': namespace['prepend_url'],
+            'useNamespace': use_namespace,
+            'connector': connector,
+        },
+        {
+            'database': namespace['database'] + '-versions',
+            'redirect': 'no',
+            'type': 'termVersion',
+            'namespace': namespace['pref_namespace_prefix'],
+            'prefix': '',
+            'useNamespace': '',
+            'connector': '',
+        },
+    ]
+
+    column_indexes = {}
+    for column in expected_rows[0]:
+        found, index = findColumnWithHeader(header, column)
+        if not found:
+            raise ValueError(
+                'Required redirects.csv column is missing: ' + column
+            )
+        column_indexes[column] = index
+
+    changed = False
+
+    for expected in expected_rows:
+        database_value = expected['database']
+        database_column = column_indexes['database']
+        matches = [
+            row_number for row_number in range(1, len(table))
+            if table[row_number][database_column] == database_value
+        ]
+
+        if len(matches) > 1:
+            raise ValueError(
+                'Redirect identity occurs more than once in redirects.csv: ' +
+                database_value
+            )
+
+        if not matches:
+            new_row = [''] * len(header)
+            for column, value in expected.items():
+                new_row[column_indexes[column]] = value
+            table.append(new_row)
+            changed = True
+            continue
+
+        row = table[matches[0]]
+        for column, value in expected.items():
+            column_index = column_indexes[column]
+            if row[column_index] != value:
+                row[column_index] = value
+                changed = True
+
+    if changed:
+        writeCsv(redirects_path, table)
+
+    return changed
 
 
 def term_list_metadata_changed(namespace, termlist_uri):
@@ -2733,9 +2761,9 @@ for vocabulary_config in vocabularies:
     (
         vocabulary_membership_changed,
         standard_membership_changed,
-        displaced_by_this_vocabulary,
+        displaced_here,
     ) = reconcile_configured_containment()
-    displaced_vocabulary_iris.update(displaced_by_this_vocabulary)
+    displaced_vocabulary_iris.update(displaced_here)
 
     for namespace in namespaces:
         # Step 1 (from first cell in development Jupyter notebook simplified_process_rs_tdwg_org.ipynb)
@@ -2800,6 +2828,12 @@ for vocabulary_config in vocabularies:
                 )
                 report('Namespace: ' + namespaceUri, indent=4)
                 report('Term list: ' + termlist_uri, indent=4)
+
+        if reconcile_namespace_redirect(namespace):
+            report(
+                'Redirect metadata reconciled for ' + namespaceUri + '.',
+                indent=2,
+            )
 
         # Step 2. Create new mapping and configuration files. If run for existing term lists, it will overwrite a bunch of stuff
         if new_term_list:
@@ -2996,14 +3030,16 @@ def reconcile_version_statuses(filename, identity_column_name, date_column_name,
                                retired_identities=None):
     table = readCsv(filename)
     target_date = datetime.datetime.strptime(date_issued, '%Y-%m-%d').date()
-    retired_identities = set(retired_identities or [])
+    retired_identities = set(retired_identities or ())
 
     document_modified_column = findColumnWithHeader(table[0], 'document_modified')[1]
     identity_column = findColumnWithHeader(table[0], identity_column_name)[1]
     date_column = findColumnWithHeader(table[0], date_column_name)[1]
     status_column = findColumnWithHeader(table[0], status_column_name)[1]
 
-    # Resources having a version in this release participate normally.
+    # Resources with a version in this release participate normally. Resources
+    # explicitly retired by containment transfer participate without minting a
+    # replacement version.
     target_identities = set()
     parsed_dates = {}
     for row_number in range(1, len(table)):
@@ -3014,37 +3050,33 @@ def reconcile_version_statuses(filename, identity_column_name, date_column_name,
         if version_date == target_date:
             target_identities.add(table[row_number][identity_column])
 
-    conflict = target_identities & retired_identities
-    if conflict:
+    conflicts = target_identities & retired_identities
+    if conflicts:
         raise ValueError(
-            'Resource identities cannot both have a target-release version and '
-            'be retired in the same release: ' + ', '.join(sorted(conflict))
+            'Resource identities cannot both receive a target-date version and '
+            'be retired in the same release: ' + ', '.join(sorted(conflicts))
         )
-
-    participating_identities = target_identities | retired_identities
 
     changed = False
     for row_number in range(1, len(table)):
         row = table[row_number]
         identity = row[identity_column]
-
-        if identity not in participating_identities:
-            continue
-
         version_date = parsed_dates[row_number]
 
-        if version_date > target_date:
-            # Do not alter a later release if processing an older release state.
-            continue
-
         if identity in retired_identities:
-            # Retirement does not mint a new version. All extant versions of the
-            # retired resource become historical.
+            if version_date > target_date:
+                continue
             desired_status = 'superseded'
-        elif version_date == target_date:
-            desired_status = 'recommended'
+        elif identity in target_identities:
+            if version_date == target_date:
+                desired_status = 'recommended'
+            elif version_date < target_date:
+                desired_status = 'superseded'
+            else:
+                # Do not alter a later release if processing an older release state.
+                continue
         else:
-            desired_status = 'superseded'
+            continue
 
         if row[status_column] != desired_status:
             row[status_column] = desired_status
@@ -3064,17 +3096,13 @@ if reconcile_version_statuses(
         ('term-lists-versions',), date_issued, local_offset_from_utc
     )
 
-# A Vocabulary displaced as the current owner of configured Term Lists is
-# retired only if it has no current Term List membership remaining after all
-# configured containment has been reconciled.
 current_vocabulary_members = readCsv('../vocabularies/vocabularies-members.csv')
 vocabularies_with_current_members = {
     row[0] for row in current_vocabulary_members[1:]
 }
-retired_vocabulary_iris = {
-    vocabulary_iri for vocabulary_iri in displaced_vocabulary_iris
-    if vocabulary_iri not in vocabularies_with_current_members
-}
+retired_vocabulary_iris = (
+    displaced_vocabulary_iris - vocabularies_with_current_members
+)
 
 if reconcile_version_statuses(
     '../vocabularies-versions/vocabularies-versions.csv',
@@ -3305,81 +3333,38 @@ def _document_configuration_path(document_iri):
 
 
 def generic_document_changed(document_iri):
-    """Return whether a configured non-LoT Document needs a release version.
+    """Return whether an explicitly configured non-LoT Document needs a version.
 
-    The per-Document ``doc_modified`` value is the maintainer's explicit signal
-    that the Document changed on a particular date. Stable Standard composition
-    in config.yaml must not itself cause old Documents to be re-versioned.
-
-    A Document absent from current metadata is new and must be processed. For an
-    existing Document, process it only when its configured ``doc_modified`` is
-    the target release date and that dated Document version does not already
-    exist. This also makes a same-release rerun idempotent. A future modification
-    date is rejected because that state cannot belong to the target release.
+    A missing current Document is new. For an existing Document, a local
+    document_configuration.yaml, when present, is the maintained declaration of
+    intended metadata. Existing Documents without local updater configuration
+    are simply carried forward.
     """
     docs = readCsv('../docs/docs.csv')
     header = docs[0]
     current_col = findColumnWithHeader(header, 'current_iri')[1]
     matches = [row for row in docs[1:] if row[current_col] == document_iri]
-    if len(matches) > 1:
+    if not matches:
+        return True
+    if len(matches) != 1:
         raise ValueError(
-            'Expected at most one current Document row for ' + document_iri + '.'
+            'Expected exactly one current Document row for ' + document_iri + '.'
         )
 
     config_path = _document_configuration_path(document_iri)
     if not os.path.isfile(config_path):
-        if not matches:
-            raise ValueError(
-                'New configured Document lacks document_configuration.yaml: ' +
-                document_iri
-            )
         return False
-
     with open(config_path, 'rt', encoding='utf-8') as file_object:
         declared = yaml.safe_load(file_object) or {}
-
-    if not matches:
-        return True
-
-    configured_modified = declared.get('doc_modified')
-    if not configured_modified:
-        raise ValueError(
-            'Configured Document lacks doc_modified in ' + config_path + '.'
-        )
-
-    try:
-        modified_date = datetime.date.fromisoformat(str(configured_modified))
-        target_date = datetime.date.fromisoformat(str(date_issued))
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            'Invalid Document modification/release date for ' + document_iri + '.'
-        ) from error
-
-    if modified_date > target_date:
-        raise ValueError(
-            'Configured Document ' + document_iri + ' has doc_modified ' +
-            modified_date.isoformat() + ', which is after target release ' +
-            target_date.isoformat() + '.'
-        )
-    if modified_date < target_date:
-        return False
-
-    # The Document is explicitly declared changed in this release. If its target
-    # version already exists, this is a same-release rerun and no update is needed.
-    versions = readCsv('../docs-versions/docs-versions.csv')
-    version_header = versions[0]
-    version_col = findColumnWithHeader(version_header, 'version_iri')[1]
-    identity_col = findColumnWithHeader(version_header, 'current_iri')[1]
-    target_version_iri = document_iri + date_issued
-    target_matches = [
-        row for row in versions[1:]
-        if row[identity_col] == document_iri and row[version_col] == target_version_iri
-    ]
-    if len(target_matches) > 1:
-        raise ValueError(
-            'Document version occurs more than once: ' + target_version_iri + '.'
-        )
-    return not target_matches
+    current = dict(zip(header, matches[0]))
+    for key, value in declared.items():
+        if key == 'mediaType' or value is None:
+            continue
+        if key == 'current_iri':
+            value = document_iri
+        if key in current and str(current[key]) != str(value):
+            return True
+    return False
 
 
 def _write_general_document_config(document_iri, original_text):
