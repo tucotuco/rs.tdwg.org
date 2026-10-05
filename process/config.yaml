@@ -203,7 +203,7 @@ vocabularies:
   vocab_type: 2
   list_of_terms_iri: http://rs.tdwg.org/dwc/doc/tcr/
   vocabulary_label: Taxon Completeness Reported Controlled Vocabulary
-  vocabulary_description: A controlled vocabulary for the term eco:taxonCompletenessReported.
+  vocabulary_description: A controlled vocabulary for the Humboldt Extension for Ecological Inventories term eco:taxonCompletenessReported.
   dc_creator: TDWG Humboldt Extension Task Group
   dcterms_license: https://creativecommons.org/licenses/by/4.0/
   namespaces:
