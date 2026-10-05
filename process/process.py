@@ -19,9 +19,10 @@ future membership.
 
 Vocabulary-associated Lists-of-Terms Documents are versioned when member Term
 Lists change or the Vocabulary's Term List membership changes. Other configured
-Documents use ``doc_modified`` in their per-Document
-``document_configuration.yaml`` as the explicit signal that they changed in this
-release.
+Documents use ``modified: true`` in the release-level ``documents`` declaration
+as the explicit signal that they changed in this release. Document metadata and
+contributors are declared centrally in ``config.yaml``; creation and modification
+dates are derived from historical metadata and the target release date.
 
 Processing is transactional. The complete workflow runs first in a temporary
 copy of the repository. The staged repository delta is published to the caller's
@@ -50,13 +51,9 @@ import hashlib
 import tempfile
 import urllib.parse
 import subprocess
-import contextlib
-import io
 import textwrap
 from pathlib import Path
 import pandas as pd
-
-from document_metadata_processing.tdwg_docs_metadata_update import update_document_metadata
 
 # -----------------------
 # Console reporting
@@ -388,6 +385,7 @@ release_directory = config.get(
 )
 vocabularies = config['vocabularies']
 documents = config['documents']
+document_defaults = config.get('document_defaults', {})
 
 # The existing processing functions use vocabulary-scoped globals. Keep that
 # implementation detail localized here while the public configuration model is
@@ -2432,18 +2430,65 @@ for vocabulary_config in vocabularies:
                 )
             seen[value] = vocabulary_config['vocabulary']
 
-# Validate the stable declaration of current direct Document parts.
+# Validate the centralized declaration of current direct Document parts.
+# Resource identity and Standard containment are derived rather than repeated:
+#   current_iri      <- document
+#   dcterms_isPartOf <- standard
+# Creation/modification dates are likewise release state, not configuration:
+#   new Document     -> doc_created = doc_modified = date_issued
+#   changed Document -> historical doc_created, doc_modified = date_issued
+if not isinstance(document_defaults, dict):
+    raise ValueError(
+        'Release preflight failed: document_defaults must be a YAML mapping'
+    )
+
+_document_metadata_keys = {
+    'documentTitle', 'abstract', 'creator', 'mediaType', 'accessUrl',
+    'browserRedirectUri', 'publisher', 'license_statement', 'license_uri',
+    'comment',
+}
+_document_control_keys = {'document', 'modified', 'contributors'}
+_document_forbidden_keys = {
+    'current_iri', 'dcterms_isPartOf', 'doc_created', 'doc_modified', 'citation'
+}
+_contributor_keys = {
+    'contributor_iri', 'contributor_literal', 'contributor_role',
+    'role_uri', 'affiliation', 'affiliation_uri',
+}
+
+unknown_default_keys = sorted(set(document_defaults) - _document_metadata_keys)
+if unknown_default_keys:
+    raise ValueError(
+        'Release preflight failed: document_defaults contains unsupported keys: ' +
+        ', '.join(unknown_default_keys)
+    )
+
 configured_document_iris = []
+list_of_terms_document_iris = {
+    vocabulary_config['list_of_terms_iri'] for vocabulary_config in vocabularies
+}
 for document_index, document_config in enumerate(documents, start=1):
     context = 'documents[' + str(document_index) + ']'
     if not isinstance(document_config, dict):
         raise ValueError('Release preflight failed: ' + context + ' must be a YAML mapping')
-    if set(document_config) != {'document'}:
+
+    forbidden = sorted(set(document_config) & _document_forbidden_keys)
+    if forbidden:
         raise ValueError(
             'Release preflight failed: ' + context +
-            ' must contain exactly one key: document'
+            ' declares derived Document fields: ' + ', '.join(forbidden)
         )
-    document_iri = document_config['document']
+
+    unknown = sorted(
+        set(document_config) - _document_control_keys - _document_metadata_keys
+    )
+    if unknown:
+        raise ValueError(
+            'Release preflight failed: ' + context +
+            ' contains unsupported keys: ' + ', '.join(unknown)
+        )
+
+    document_iri = document_config.get('document')
     if not isinstance(document_iri, str) or not document_iri.strip():
         raise ValueError(
             'Release preflight failed: ' + context +
@@ -2454,6 +2499,60 @@ for document_index, document_config in enumerate(documents, start=1):
             'Release preflight failed: duplicate configured Document ' + document_iri
         )
     configured_document_iris.append(document_iri)
+
+    modified = document_config.get('modified', False)
+    if not isinstance(modified, bool):
+        raise ValueError(
+            'Release preflight failed: ' + context + '.modified must be true or false'
+        )
+    if document_iri in list_of_terms_document_iris and 'modified' in document_config:
+        raise ValueError(
+            'Release preflight failed: ' + context +
+            ' is a Vocabulary List-of-Terms Document; its versioning is controlled '
+            'by Vocabulary/Term List changes, so modified must be omitted'
+        )
+
+    resolved_metadata = dict(document_defaults)
+    resolved_metadata.update({
+        key: value for key, value in document_config.items()
+        if key in _document_metadata_keys
+    })
+    missing_metadata = sorted(
+        key for key in _document_metadata_keys if key not in resolved_metadata
+    )
+    if missing_metadata:
+        raise ValueError(
+            'Release preflight failed: ' + context +
+            ' lacks required Document metadata after defaults are applied: ' +
+            ', '.join(missing_metadata)
+        )
+
+    contributors = document_config.get('contributors')
+    if not isinstance(contributors, list):
+        raise ValueError(
+            'Release preflight failed: ' + context + '.contributors must be a YAML list'
+        )
+    for contributor_index, contributor in enumerate(contributors, start=1):
+        contributor_context = (
+            context + '.contributors[' + str(contributor_index) + ']'
+        )
+        if not isinstance(contributor, dict):
+            raise ValueError(
+                'Release preflight failed: ' + contributor_context +
+                ' must be a YAML mapping'
+            )
+        missing = sorted(_contributor_keys - set(contributor))
+        unknown = sorted(set(contributor) - _contributor_keys)
+        if missing:
+            raise ValueError(
+                'Release preflight failed: ' + contributor_context +
+                ' is missing keys: ' + ', '.join(missing)
+            )
+        if unknown:
+            raise ValueError(
+                'Release preflight failed: ' + contributor_context +
+                ' contains unsupported keys: ' + ', '.join(unknown)
+            )
 
 configured_vocabulary_iris = [v['vocabulary'] for v in vocabularies]
 if len(configured_vocabulary_iris) != len(set(configured_vocabulary_iris)):
@@ -3130,88 +3229,6 @@ report(
     indent=2,
 )
 
-def _restore_standard_part_order_after_document_update(
-        before_rows, standard_version_uri):
-    """Preserve Standard-part positions across the imported Document updater.
-
-    The updater may replace a Document version by removing the old membership
-    and appending the new one. Reorder the target Standard-version memberships
-    by underlying resource identity so a version advance occupies the same
-    position as the resource it supersedes. Genuine new resources are appended.
-    """
-    path = '../standards-versions/standards-versions-parts.csv'
-    after_rows = readCsv(path)
-
-    vocabulary_versions = readCsv('../vocabularies-versions/vocabularies-versions.csv')
-    vv_header = vocabulary_versions[0]
-    vv_version = findColumnWithHeader(vv_header, 'version')[1]
-    vv_vocabulary = findColumnWithHeader(vv_header, 'vocabulary')[1]
-    vocabulary_identity = {
-        row[vv_version]: ('vocabulary', row[vv_vocabulary])
-        for row in vocabulary_versions[1:]
-    }
-
-    document_versions = readCsv('../docs-versions/docs-versions.csv')
-    dv_header = document_versions[0]
-    dv_version = findColumnWithHeader(dv_header, 'version')[1]
-    dv_document = findColumnWithHeader(dv_header, 'document')[1]
-    document_identity = {
-        row[dv_version]: ('document', row[dv_document])
-        for row in document_versions[1:]
-    }
-
-    def part_identity(version_uri):
-        if version_uri in vocabulary_identity:
-            return vocabulary_identity[version_uri]
-        if version_uri in document_identity:
-            return document_identity[version_uri]
-        return ('other', version_uri)
-
-    before_identities = []
-    for row in before_rows[1:]:
-        if row[0] == standard_version_uri:
-            identity = part_identity(row[1])
-            if identity not in before_identities:
-                before_identities.append(identity)
-
-    after_by_identity = {}
-    after_identity_order = []
-    for row in after_rows[1:]:
-        if row[0] != standard_version_uri:
-            continue
-        identity = part_identity(row[1])
-        if identity not in after_by_identity:
-            after_by_identity[identity] = row
-            after_identity_order.append(identity)
-
-    desired_identities = [
-        identity for identity in before_identities
-        if identity in after_by_identity
-    ]
-    desired_identities.extend(
-        identity for identity in after_identity_order
-        if identity not in desired_identities
-    )
-    desired_rows = [after_by_identity[identity] for identity in desired_identities]
-
-    reconciled = [after_rows[0]]
-    desired_index = 0
-    for row in after_rows[1:]:
-        if row[0] == standard_version_uri:
-            if desired_index < len(desired_rows):
-                reconciled.append(desired_rows[desired_index])
-                desired_index += 1
-        else:
-            reconciled.append(row)
-
-    while desired_index < len(desired_rows):
-        reconciled.append(desired_rows[desired_index])
-        desired_index += 1
-
-    if reconciled != after_rows:
-        writeCsv(path, reconciled)
-
-
 # -----------------------
 # Reconcile the stable declaration of current Standard composition.
 # -----------------------
@@ -3242,27 +3259,149 @@ def reconcile_current_standard_composition():
     return False
 
 
-def _document_configuration_path(document_iri):
-    subdirectory = '_'.join(document_iri.split('/')[3:-1])
-    return os.path.join(
-        process_dir, 'document_metadata_processing', subdirectory,
-        'document_configuration.yaml'
-    )
+def _resolved_document_config(document_config):
+    """Return one Document declaration with release-level defaults applied.
+
+    Identity, Standard containment, and lifecycle dates are deliberately not
+    configurable here. They are derived by the release processor.
+    """
+    resolved = dict(document_defaults)
+    resolved.update({
+        key: value for key, value in document_config.items()
+        if key not in {'document', 'modified', 'contributors'}
+    })
+    resolved['current_iri'] = document_config['document']
+    resolved['dcterms_isPartOf'] = standardUri
+    return resolved
 
 
-def generic_document_changed(document_iri):
+def _document_dataframe(path):
+    """Read a Document metadata CSV with blanks preserved as empty strings."""
+    return pd.read_csv(path, na_filter=False, dtype=str)
+
+
+def _ensure_dataframe_columns(dataframe, rows):
+    """Ensure that every key used by replacement rows exists as a DataFrame column."""
+    for row in rows:
+        for column in row:
+            if column not in dataframe.columns:
+                dataframe[column] = ''
+    return dataframe
+
+
+def _rows_dataframe(dataframe, rows):
+    """Build replacement rows using the existing DataFrame column order."""
+    if not rows:
+        return pd.DataFrame(columns=dataframe.columns)
+    normalized = [
+        {column: row.get(column, '') for column in dataframe.columns}
+        for row in rows
+    ]
+    return pd.DataFrame(normalized, columns=dataframe.columns)
+
+
+def _write_dataframe_if_changed(path, before, after):
+    """Write a DataFrame only when its cell/column representation changed."""
+    if list(before.columns) != list(after.columns) or not before.equals(after):
+        after.to_csv(path, index=False)
+        return True
+    return False
+
+
+def _upsert_dataframe_row(dataframe, row_data, key_columns):
+    """Replace a stable-identity row in place, appending only a new identity."""
+    dataframe = _ensure_dataframe_columns(dataframe.copy(), [row_data])
+    if len(dataframe) == 0:
+        return _rows_dataframe(dataframe, [row_data]).reset_index(drop=True)
+
+    mask = pd.Series(True, index=dataframe.index)
+    for column in key_columns:
+        mask &= dataframe[column] == row_data[column]
+    matching_positions = [
+        position for position, matched in enumerate(mask.tolist()) if matched
+    ]
+    if not matching_positions:
+        return pd.concat(
+            [dataframe, _rows_dataframe(dataframe, [row_data])],
+            ignore_index=True
+        )
+
+    first_position = matching_positions[0]
+    retained = dataframe.loc[~mask].reset_index(drop=True)
+    before = retained.iloc[:first_position]
+    after = retained.iloc[first_position:]
+    replacement = _rows_dataframe(dataframe, [row_data])
+    return pd.concat([before, replacement, after], ignore_index=True)
+
+
+def _replace_dataframe_scope(dataframe, scope_column, scope_value, rows):
+    """Replace one generated relationship scope without moving that scope."""
+    dataframe = _ensure_dataframe_columns(dataframe.copy(), rows)
+    if len(dataframe) == 0:
+        return _rows_dataframe(dataframe, rows).reset_index(drop=True)
+
+    mask = dataframe[scope_column] == scope_value
+    matching_positions = [
+        position for position, matched in enumerate(mask.tolist()) if matched
+    ]
+    if not matching_positions:
+        if not rows:
+            return dataframe.reset_index(drop=True)
+        return pd.concat(
+            [dataframe, _rows_dataframe(dataframe, rows)],
+            ignore_index=True
+        )
+
+    first_position = matching_positions[0]
+    retained = dataframe.loc[~mask].reset_index(drop=True)
+    before = retained.iloc[:first_position]
+    after = retained.iloc[first_position:]
+    replacement = _rows_dataframe(dataframe, rows)
+    return pd.concat([before, replacement, after], ignore_index=True)
+
+
+def _document_predecessor(versions_metadata_df, document_iri):
+    """Return (version IRI, issued date) for the latest version before this release."""
+    target_date = datetime.date.fromisoformat(date_issued)
+    candidates = []
+    for _, row in versions_metadata_df.iterrows():
+        if row['current_iri'] != document_iri:
+            continue
+        try:
+            issued_date = datetime.date.fromisoformat(row['version_issued'])
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                'Document ' + document_iri + ' has invalid version_issued date ' +
+                repr(row['version_issued']) + '.'
+            ) from error
+        if issued_date < target_date:
+            candidates.append((issued_date, row['version_iri']))
+
+    if not candidates:
+        raise ValueError(
+            'No predecessor Document version issued before ' + date_issued +
+            ' was found for ' + document_iri + '.'
+        )
+    latest_date = max(candidate[0] for candidate in candidates)
+    latest = [uri for issued, uri in candidates if issued == latest_date]
+    if len(latest) != 1:
+        raise ValueError(
+            'Document ' + document_iri + ' has multiple predecessor versions dated ' +
+            latest_date.isoformat() + '.'
+        )
+    return latest[0], latest_date.isoformat()
+
+
+def generic_document_changed(document_config):
     """Return whether a configured non-LoT Document needs a release version.
 
-    The per-Document ``doc_modified`` value is the maintainer's explicit signal
-    that the Document changed on a particular date. Stable Standard composition
-    in config.yaml must not itself cause old Documents to be re-versioned.
-
-    A Document absent from current metadata is new and must be processed. For an
-    existing Document, process it only when its configured ``doc_modified`` is
-    the target release date and that dated Document version does not already
-    exist. This also makes a same-release rerun idempotent. A future modification
-    date is rejected because that state cannot belong to the target release.
+    Stable Standard composition is independent of Document lifecycle. A Document
+    absent from current metadata is new and receives its first version in this
+    release. An existing Document receives a new version only when the release
+    declaration says ``modified: true``. The target release date itself supplies
+    ``doc_modified``; it is never repeated in per-Document configuration.
     """
+    document_iri = document_config['document']
     docs = readCsv('../docs/docs.csv')
     header = docs[0]
     current_col = findColumnWithHeader(header, 'current_iri')[1]
@@ -3271,47 +3410,12 @@ def generic_document_changed(document_iri):
         raise ValueError(
             'Expected at most one current Document row for ' + document_iri + '.'
         )
-
-    config_path = _document_configuration_path(document_iri)
-    if not os.path.isfile(config_path):
-        if not matches:
-            raise ValueError(
-                'New configured Document lacks document_configuration.yaml: ' +
-                document_iri
-            )
-        return False
-
-    with open(config_path, 'rt', encoding='utf-8') as file_object:
-        declared = yaml.safe_load(file_object) or {}
-
     if not matches:
         return True
-
-    configured_modified = declared.get('doc_modified')
-    if not configured_modified:
-        raise ValueError(
-            'Configured Document lacks doc_modified in ' + config_path + '.'
-        )
-
-    try:
-        modified_date = datetime.date.fromisoformat(str(configured_modified))
-        target_date = datetime.date.fromisoformat(str(date_issued))
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            'Invalid Document modification/release date for ' + document_iri + '.'
-        ) from error
-
-    if modified_date > target_date:
-        raise ValueError(
-            'Configured Document ' + document_iri + ' has doc_modified ' +
-            modified_date.isoformat() + ', which is after target release ' +
-            target_date.isoformat() + '.'
-        )
-    if modified_date < target_date:
+    if not document_config.get('modified', False):
         return False
 
-    # The Document is explicitly declared changed in this release. If its target
-    # version already exists, this is a same-release rerun and no update is needed.
+    # A same-release rerun must not create a duplicate version.
     versions = readCsv('../docs-versions/docs-versions.csv')
     version_header = versions[0]
     version_col = findColumnWithHeader(version_header, 'version_iri')[1]
@@ -3328,23 +3432,317 @@ def generic_document_changed(document_iri):
     return not target_matches
 
 
-def _write_general_document_config(document_iri, original_text):
-    text = re.sub(
-        'versionDate:.*\\n',
-        "versionDate: '" + date_issued + "'\\n",
-        original_text
-    )
-    text = re.sub(
-        'utcOffset:.*\\n',
-        'utcOffset: ' + local_offset_from_utc + '\\n',
-        text
-    )
-    text = re.sub(
-        r'^(docIri:\s*).*$', r'\1' + document_iri, text,
-        flags=re.MULTILINE
-    )
-    return text
+def _document_version_access_uri(current_access_uri, version_date):
+    """Apply the established Markdown source convention for a dated version."""
+    if 'index' not in current_access_uri:
+        raise ValueError(
+            'Cannot derive a historical Document access URI from ' +
+            repr(current_access_uri) + '; expected the current URI to contain "index".'
+        )
+    return current_access_uri.replace('index', version_date, 1)
 
+
+def update_document_metadata(document_config):
+    """Create/reconcile one Document version from the central release declaration.
+
+    Document/version metadata is handled here, while Standard composition is
+    owned exclusively by the release-level processor.
+    """
+    repo_path = os.path.abspath('..') + os.sep
+    declaration = _resolved_document_config(document_config)
+    doc_iri = document_config['document']
+    contributors = [dict(row) for row in document_config.get('contributors', [])]
+
+    current_access_url = declaration.get('accessUrl', '') or ''
+    current_media_type = declaration.get('mediaType', '') or ''
+    current_browser_redirect = declaration.get('browserRedirectUri', '') or ''
+    if not current_access_url:
+        raise ValueError('Document lacks accessUrl: ' + doc_iri)
+    if not current_media_type:
+        raise ValueError('Document lacks mediaType: ' + doc_iri)
+    if not current_browser_redirect:
+        raise ValueError('Document lacks browserRedirectUri: ' + doc_iri)
+
+    # Current Document metadata.
+    current_docs_path = repo_path + 'docs/docs.csv'
+    current_docs_df = _document_dataframe(current_docs_path)
+    matches = current_docs_df.index[
+        current_docs_df['current_iri'] == doc_iri
+    ].tolist()
+    if len(matches) > 1:
+        raise ValueError('Multiple current Document rows match ' + doc_iri + '.')
+    new_document = len(matches) == 0
+
+    if new_document:
+        row_data = {column: '' for column in current_docs_df.columns}
+        row_data['doc_created'] = date_issued
+    else:
+        row_index = matches[0]
+        row_data = current_docs_df.loc[row_index].to_dict()
+
+    # Only Document metadata fields are copied from configuration. Lifecycle and
+    # containment fields are derived from release state.
+    for key, value in declaration.items():
+        if key in current_docs_df.columns:
+            row_data[key] = '' if value is None else str(value)
+    row_data['current_iri'] = doc_iri
+    row_data['dcterms_isPartOf'] = standardUri
+    row_data['doc_modified'] = date_issued
+    if new_document:
+        row_data['doc_created'] = date_issued
+    if 'document_modified' in row_data:
+        row_data['document_modified'] = isoTime(local_offset_from_utc)
+
+    citation = '{creator}. {year}. {document_title}. {publisher}. {current_iri}{date}'
+    citation = citation.replace('{creator}', row_data['creator'])
+    citation = citation.replace('{year}', date_issued[:4])
+    citation = citation.replace('{document_title}', row_data['documentTitle'])
+    citation = citation.replace('{publisher}', row_data['publisher'])
+    citation = citation.replace('{current_iri}', doc_iri)
+    citation = citation.replace('{date}', date_issued)
+    row_data['citation'] = citation
+
+    if new_document:
+        current_docs_df = pd.concat(
+            [current_docs_df, _rows_dataframe(current_docs_df, [row_data])],
+            ignore_index=True
+        )
+    else:
+        for key, value in row_data.items():
+            current_docs_df.at[row_index, key] = value
+    current_docs_df.to_csv(current_docs_path, index=False)
+
+    doc_version_iri = doc_iri + date_issued
+
+    # Version identity join and version metadata.
+    versions_join_path = repo_path + 'docs/docs-versions.csv'
+    versions_join_df = _document_dataframe(versions_join_path)
+    versions_join_df = _upsert_dataframe_row(
+        versions_join_df,
+        {'current_iri': doc_iri, 'version_iri': doc_version_iri},
+        ['current_iri', 'version_iri']
+    )
+    versions_join_df.to_csv(versions_join_path, index=False)
+
+    versions_metadata_path = repo_path + 'docs-versions/docs-versions.csv'
+    versions_metadata_df = _document_dataframe(versions_metadata_path)
+    predecessor_iri = None
+    predecessor_date = None
+    if not new_document:
+        predecessor_iri, predecessor_date = _document_predecessor(
+            versions_metadata_df, doc_iri
+        )
+
+    versions_data = dict(row_data)
+    versions_data.pop('doc_created', None)
+    versions_data.pop('doc_modified', None)
+    versions_data['version_issued'] = date_issued
+    versions_data['version_iri'] = doc_version_iri
+    versions_data['mediaType'] = 'text/html'
+    versions_metadata_df = _upsert_dataframe_row(
+        versions_metadata_df, versions_data, ['version_iri']
+    )
+
+    if predecessor_iri is not None:
+        predecessor_matches = versions_metadata_df.index[
+            versions_metadata_df['version_iri'] == predecessor_iri
+        ].tolist()
+        if len(predecessor_matches) != 1:
+            raise ValueError(
+                'Expected exactly one predecessor metadata row for ' + predecessor_iri + '.'
+            )
+        predecessor_index = predecessor_matches[0]
+        versions_metadata_df.at[
+            predecessor_index, 'browserRedirectUri'
+        ] = current_browser_redirect + predecessor_date
+    versions_metadata_df.to_csv(versions_metadata_path, index=False)
+
+    if predecessor_iri is not None:
+        replacements_path = repo_path + 'docs-versions/docs-versions-replacements.csv'
+        replacements_df = _document_dataframe(replacements_path)
+        replacements_df = _upsert_dataframe_row(
+            replacements_df,
+            {
+                'replacing_document': doc_version_iri,
+                'replaced_document': predecessor_iri,
+            },
+            ['replacing_document', 'replaced_document']
+        )
+        replacements_df.to_csv(replacements_path, index=False)
+
+    # Current and versioned source-format metadata.
+    formats_path = repo_path + 'docs/docs-formats.csv'
+    formats_df = _document_dataframe(formats_path)
+    formats_df = _upsert_dataframe_row(
+        formats_df,
+        {
+            'doc_iri': doc_iri,
+            'mediaType': current_media_type,
+            'accessUri': current_access_url,
+        },
+        ['doc_iri']
+    )
+    formats_df.to_csv(formats_path, index=False)
+
+    versions_formats_path = repo_path + 'docs-versions/docs-versions-formats.csv'
+    versions_formats_df = _document_dataframe(versions_formats_path)
+    if predecessor_iri is not None:
+        predecessor_format_matches = versions_formats_df.index[
+            versions_formats_df['version_iri'] == predecessor_iri
+        ].tolist()
+        if len(predecessor_format_matches) != 1:
+            raise ValueError(
+                'Expected exactly one predecessor format row for ' + predecessor_iri + '.'
+            )
+        predecessor_format_index = predecessor_format_matches[0]
+        versions_formats_df.at[
+            predecessor_format_index, 'accessUri'
+        ] = _document_version_access_uri(current_access_url, predecessor_date)
+    versions_formats_df = _upsert_dataframe_row(
+        versions_formats_df,
+        {
+            'version_iri': doc_version_iri,
+            'mediaType': current_media_type,
+            'accessUri': current_access_url,
+        },
+        ['version_iri']
+    )
+    versions_formats_df.to_csv(versions_formats_path, index=False)
+
+    # Current contributor/role scopes and the target-version contributor scope.
+    authors_path = repo_path + 'docs/docs-authors.csv'
+    roles_path = repo_path + 'docs-roles/docs-roles.csv'
+    authors_df = _document_dataframe(authors_path)
+    roles_df = _document_dataframe(roles_path)
+
+    author_rows = []
+    role_rows = []
+    for contributor in contributors:
+        author = {
+            key: ('' if value is None else str(value))
+            for key, value in contributor.items()
+        }
+        author['document'] = doc_iri
+        author_rows.append(author)
+
+        contributor_role = author['contributor_role']
+        role_column = contributor_role.replace(' ', '_')
+        if role_column not in roles_df.columns:
+            report(
+                'WARNING: Document contributor role has no existing docs-roles.csv '
+                'column; a column will be added: ' + contributor_role + ' (' +
+                author['contributor_literal'] + ').'
+            )
+        role_row = {
+            'document': doc_iri,
+            'contributor_role': contributor_role,
+            'contributor_literal': author['contributor_literal'],
+            role_column: author['contributor_iri'],
+        }
+        role_rows.append(role_row)
+
+    authors_df = _replace_dataframe_scope(
+        authors_df, 'document', doc_iri, author_rows
+    )
+    roles_df = _replace_dataframe_scope(
+        roles_df, 'document', doc_iri, role_rows
+    )
+    authors_df.to_csv(authors_path, index=False)
+    roles_df.to_csv(roles_path, index=False)
+
+    versions_authors_path = repo_path + 'docs-versions/docs-versions-authors.csv'
+    versions_authors_df = _document_dataframe(versions_authors_path)
+    version_author_rows = []
+    for author in author_rows:
+        version_author = dict(author)
+        version_author.pop('document', None)
+        version_author['document_version'] = doc_version_iri
+        version_author_rows.append(version_author)
+    versions_authors_df = _replace_dataframe_scope(
+        versions_authors_df, 'document_version', doc_version_iri,
+        version_author_rows
+    )
+    versions_authors_df.to_csv(versions_authors_path, index=False)
+
+
+def reconcile_document_delivery_metadata(document_config):
+    """Reconcile hosting/source locations without creating a Document version.
+
+    Moving an unchanged Document to a different website is delivery metadata, not
+    a semantic Document revision. The current Document and its latest applicable
+    version may therefore acquire new redirect/source locations independently of
+    ``modified: true``.
+    """
+    declaration = _resolved_document_config(document_config)
+    doc_iri = document_config['document']
+    browser_redirect = declaration['browserRedirectUri']
+    access_uri = declaration['accessUrl']
+    media_type = declaration['mediaType']
+
+    current_path = '../docs/docs.csv'
+    current_df = _document_dataframe(current_path)
+    current_before = current_df.copy(deep=True)
+    matches = current_df.index[current_df['current_iri'] == doc_iri].tolist()
+    if len(matches) != 1:
+        raise ValueError(
+            'Expected exactly one current Document row while reconciling delivery for ' +
+            doc_iri + '.'
+        )
+    current_index = matches[0]
+    if 'browserRedirectUri' in current_df.columns:
+        current_df.at[current_index, 'browserRedirectUri'] = browser_redirect
+    if 'accessUrl' in current_df.columns:
+        current_df.at[current_index, 'accessUrl'] = access_uri
+    _write_dataframe_if_changed(current_path, current_before, current_df)
+
+    formats_path = '../docs/docs-formats.csv'
+    formats_df = _document_dataframe(formats_path)
+    formats_before = formats_df.copy(deep=True)
+    formats_df = _upsert_dataframe_row(
+        formats_df,
+        {'doc_iri': doc_iri, 'mediaType': media_type, 'accessUri': access_uri},
+        ['doc_iri']
+    )
+    _write_dataframe_if_changed(formats_path, formats_before, formats_df)
+
+    versions_path = '../docs-versions/docs-versions.csv'
+    versions_df = _document_dataframe(versions_path)
+    versions_before = versions_df.copy(deep=True)
+    target_date = datetime.date.fromisoformat(date_issued)
+    candidates = []
+    for index, row in versions_df.iterrows():
+        if row['current_iri'] != doc_iri:
+            continue
+        issued = datetime.date.fromisoformat(row['version_issued'])
+        if issued <= target_date:
+            candidates.append((issued, index, row['version_iri']))
+    if not candidates:
+        raise ValueError(
+            'No Document version exists on or before ' + date_issued + ': ' + doc_iri
+        )
+    latest_date = max(value[0] for value in candidates)
+    latest = [value for value in candidates if value[0] == latest_date]
+    if len(latest) != 1:
+        raise ValueError(
+            'Document ' + doc_iri + ' has multiple versions dated ' +
+            latest_date.isoformat() + '.'
+        )
+    _, version_index, version_iri = latest[0]
+    if 'browserRedirectUri' in versions_df.columns:
+        versions_df.at[version_index, 'browserRedirectUri'] = browser_redirect
+    _write_dataframe_if_changed(versions_path, versions_before, versions_df)
+
+    versions_formats_path = '../docs-versions/docs-versions-formats.csv'
+    versions_formats_df = _document_dataframe(versions_formats_path)
+    versions_formats_before = versions_formats_df.copy(deep=True)
+    versions_formats_df = _upsert_dataframe_row(
+        versions_formats_df,
+        {'version_iri': version_iri, 'mediaType': media_type, 'accessUri': access_uri},
+        ['version_iri']
+    )
+    _write_dataframe_if_changed(
+        versions_formats_path, versions_formats_before, versions_formats_df
+    )
 
 def reconcile_target_standard_version_parts():
     """Make the target Standard version exactly represent configured parts."""
@@ -3413,94 +3811,56 @@ def reconcile_target_standard_version_parts():
 
 
 # -----------------------
-# Update each Vocabulary's human-readable List-of-Terms Document metadata.
+# Update configured human-readable Document metadata.
 # -----------------------
-process_dir = os.path.dirname(os.path.abspath(__file__))
-general_config_path = os.path.join(
-    process_dir, 'document_metadata_processing', 'general_configuration.yaml'
-)
-with open(general_config_path, 'rt', encoding='utf-8') as file_object:
-    original_general_config_text = file_object.read()
+list_of_terms_documents = {
+    vocabulary_config['list_of_terms_iri']
+    for vocabulary_config in vocabularies
+}
+document_config_by_iri = {
+    document_config['document']: document_config
+    for document_config in documents
+}
 
-try:
-    for vocabulary_config in vocabularies:
-        vocabulary_result = next(
-            result for result in vocabulary_results
-            if result['vocabulary'] == vocabulary_config['vocabulary']
-        )
-        if not vocabulary_result['document_changed']:
-            report(
-                'Document: retained existing List-of-Terms version for ' +
-                vocabulary_config['vocabulary_label'] + '.'
-            )
-            continue
-        general_config_text = _write_general_document_config(
-            vocabulary_config['list_of_terms_iri'], original_general_config_text
-        )
-        with open(general_config_path, 'wt', encoding='utf-8') as file_object:
-            file_object.write(general_config_text)
-        standard_parts_before_document_update = readCsv(
-            '../standards-versions/standards-versions-parts.csv'
-        )
-        captured_document_output = io.StringIO()
-        with contextlib.redirect_stdout(captured_document_output):
-            update_document_metadata(
-                repo_path=os.path.abspath(os.path.join(process_dir, '..')),
-                general_config_path=general_config_path
-            )
-        _restore_standard_part_order_after_document_update(
-            standard_parts_before_document_update,
-            standardUri + '/version/' + date_issued
-        )
+# Vocabulary-associated Lists-of-Terms Documents are versioned according to
+# Vocabulary/Term List release state, not by a per-Document modified flag.
+for vocabulary_config in vocabularies:
+    vocabulary_result = next(
+        result for result in vocabulary_results
+        if result['vocabulary'] == vocabulary_config['vocabulary']
+    )
+    document_iri = vocabulary_config['list_of_terms_iri']
+    document_config = document_config_by_iri[document_iri]
+    if vocabulary_result['document_changed']:
+        update_document_metadata(document_config)
         report(
             'Document: processed List-of-Terms metadata for ' +
             vocabulary_config['vocabulary_label'] + '.'
         )
+    else:
+        report(
+            'Document: retained existing List-of-Terms version for ' +
+            vocabulary_config['vocabulary_label'] + '.'
+        )
+    reconcile_document_delivery_metadata(document_config)
 
-    # Process configured Documents that are not Vocabulary-associated Lists of
-    # Terms. The documents list declares stable current Standard composition;
-    # each Document's document_configuration.yaml doc_modified value explicitly
-    # declares whether that Document changed in the target release.
-    list_of_terms_documents = {
-        vocabulary_config['list_of_terms_iri']
-        for vocabulary_config in vocabularies
-    }
-    for document_config in documents:
-        document_iri = document_config['document']
-        if document_iri in list_of_terms_documents:
-            continue
-        if not generic_document_changed(document_iri):
-            report('Document: retained existing version for ' + document_iri + '.')
-            continue
-        general_config_text = _write_general_document_config(
-            document_iri, original_general_config_text
-        )
-        with open(general_config_path, 'wt', encoding='utf-8') as file_object:
-            file_object.write(general_config_text)
-        standard_parts_before_document_update = readCsv(
-            '../standards-versions/standards-versions-parts.csv'
-        )
-        captured_document_output = io.StringIO()
-        with contextlib.redirect_stdout(captured_document_output):
-            update_document_metadata(
-                repo_path=os.path.abspath(os.path.join(process_dir, '..')),
-                general_config_path=general_config_path
-            )
-        _restore_standard_part_order_after_document_update(
-            standard_parts_before_document_update,
-            standardUri + '/version/' + date_issued
-        )
+# Other Documents receive a new version only when new or explicitly marked
+# modified in this release. Hosting/source moves are reconciled independently.
+for document_config in documents:
+    document_iri = document_config['document']
+    if document_iri in list_of_terms_documents:
+        continue
+    if generic_document_changed(document_config):
+        update_document_metadata(document_config)
         report('Document: processed metadata for ' + document_iri + '.')
+    else:
+        report('Document: retained existing version for ' + document_iri + '.')
+    reconcile_document_delivery_metadata(document_config)
 
-    # Only now, after any new Document has acquired its first version, make the
-    # unversioned and target-version Standard composition exactly match config.
-    reconcile_current_standard_composition()
-    reconcile_target_standard_version_parts()
-finally:
-    # general_configuration.yaml is runtime input to the imported Document
-    # updater, not a release artifact. Never leave per-document state behind.
-    with open(general_config_path, 'wt', encoding='utf-8') as file_object:
-        file_object.write(original_general_config_text)
+# Only now, after every new Document has acquired its first version, make the
+# unversioned and target-version Standard composition exactly match config.
+reconcile_current_standard_composition()
+reconcile_target_standard_version_parts()
 
 # -----------------------
 # Generate a GitHub-release-ready summary of the proposed release.
