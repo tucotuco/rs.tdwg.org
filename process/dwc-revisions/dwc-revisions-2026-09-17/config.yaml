@@ -18,9 +18,7 @@ documents:
 # DARWIN CORE LIST OF TERMS
 - document: http://rs.tdwg.org/dwc/doc/list/
   documentTitle: Darwin Core List of Terms
-  abstract: Darwin Core is a vocabulary standard for transmitting information about biodiversity. This document
-    lists all terms currently used in the standard, whether from the Darwin Core vocabulary, other TDWG vocabularies,
-    or vocabularies external to TDWG.
+  abstract: Darwin Core is a vocabulary standard for transmitting information about biodiversity. This document lists all terms currently used in the standard, whether from the Darwin Core vocabulary, other TDWG vocabularies, or vocabularies external to TDWG.
   creator: Darwin Core Maintenance Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/list/index.md
@@ -359,9 +357,7 @@ documents:
 # DEGREE OF ESTABLISHMENT LIST OF TERMS
 - document: http://rs.tdwg.org/dwc/doc/doe/
   documentTitle: Degree of Establishment Controlled Vocabulary List of Terms
-  abstract: The Darwin Core term `degreeOfEstablishment` provides information about degree to which an Organism
-    survives, reproduces, and expands its range at the given place and time. The Degree of Establishment Controlled
-    Vocabulary provides terms that should be used as values for `dwc:degreeOfEstablishment` and `dwciri:degreeOfEstablishment`.
+  abstract: The Darwin Core term `dwc:degreeOfEstablishment` provides information about degree to which a `dwc:Organism` survives, reproduces, and expands its range at the given place and time. The Degree of Establishment Controlled Vocabulary provides terms that should be used as values for `dwc:degreeOfEstablishment` and `dwciri:degreeOfEstablishment`.
   creator: TDWG Darwin Core Maintenance Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/doe/index.md
@@ -454,10 +450,7 @@ documents:
 # ESTABLISHMENT MEANS LIST OF TERMS
 - document: http://rs.tdwg.org/dwc/doc/em/
   documentTitle: Establishment Means Controlled Vocabulary List of Terms
-  abstract: The Darwin Core term `establishmentMeans` provides information about whether an organism or organisms
-    have been introduced to a given place and time through the direct or indirect activity of modern humans. The
-    Establishment Means Controlled Vocabulary provides terms that should be used as values for `dwc:establishmentMeans`
-    and `dwciri:establishmentMeans`.
+  abstract: The Darwin Core term `establishmentMeans` provides information about whether an organism or organisms have been introduced to a given place and time through the direct or indirect activity of modern humans. The Establishment Means Controlled Vocabulary provides terms that should be used as values for `dwc:establishmentMeans` and `dwciri:establishmentMeans`.
   creator: TDWG Darwin Core Maintenance Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/em/index.md
@@ -550,9 +543,7 @@ documents:
 # PATHWAY LIST OF TERMS
 - document: http://rs.tdwg.org/dwc/doc/pw/
   documentTitle: Pathway Controlled Vocabulary List of Terms
-  abstract: The Darwin Core term `pathway` provides information about the process by which an Organism came to be
-    in a given place at a given time. The Pathway Controlled Vocabulary provides terms that should be used as values
-    for `dwc:pathway` and `dwciri:pathway`.
+  abstract: The Darwin Core term `pathway` provides information about the process by which an Organism came to be in a given place at a given time. The Pathway Controlled Vocabulary provides terms that should be used as values for `dwc:pathway` and `dwciri:pathway`.
   creator: TDWG Darwin Core Maintenance Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/pw/index.md
@@ -645,14 +636,11 @@ documents:
 # TAXON COMPLETENESS REPORTED LIST OF TERMS
 - document: http://rs.tdwg.org/dwc/doc/tcr/
   documentTitle: Taxon Completeness Reported Controlled Vocabulary List of Terms
-  abstract: The Humboldt Extension for Ecological Inventories mints the term `taxonCompletenessReported` to alert
-    users that the inventory was conducted in such a way that all of the target taxa should have been detectable
-    if they were present during the dwc:Event. This vocabulary provides terms that should be used as values for
-    `eco:taxonCompletenessReported` and `ecoiri:taxonCompletenessReported`.
+  abstract: The Darwin Core term `eco:taxonCompletenessReported` provides information about whether taxonomic completeness was assessed for an `eco:Survey`. The Taxon Completeness Reported Controlled Vocabulary provides terms that should be used as values for `eco:taxonCompletenessReported` and `ecoiri:taxonCompletenessReported`.
   creator: TDWG Humboldt Extension Task Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/tcr/index.md
-  browserRedirectUri: https://eco.tdwg.org/tcr/
+  browserRedirectUri: https://dwc.tdwg.org/tcr/
   contributors:
   - contributor_iri: https://orcid.org/0000-0002-1720-0127
     contributor_literal: Yanina V. Sica
@@ -680,7 +668,7 @@ documents:
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/cm/index.md
   browserRedirectUri: https://dwc.tdwg.org/cm/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0003-1144-0290
     contributor_literal: John Wieczorek
@@ -738,7 +726,7 @@ documents:
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/dp/index.md
   browserRedirectUri: https://dwc.tdwg.org/dp/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0002-8442-8025
     contributor_literal: Peter Desmet
@@ -794,7 +782,7 @@ documents:
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/text/index.md
   browserRedirectUri: https://dwc.tdwg.org/text/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0001-6215-3617
     contributor_literal: Tim Robertson
@@ -841,15 +829,12 @@ documents:
 # DARWIN CORE RDF GUIDE
 - document: http://rs.tdwg.org/dwc/terms/guides/rdf/
   documentTitle: Darwin Core RDF guide
-  abstract: This guide is intended to facilitate the use of Darwin Core terms in the Resource Description Framework
-    (RDF). It explains basic features of RDF and provides details of how to expose data in the form of RDF using
-    Darwin Core terms and terms from other key vocabularies. It defines terms in the namespace http://rs.tdwg.org/dwc/iri/
-    which are intended for use exclusively with non-literal objects.
+  abstract: This guide is intended to facilitate the use of Darwin Core terms in the Resource Description Framework (RDF). It explains basic features of RDF and provides details of how to expose data in the form of RDF using Darwin Core terms and terms from other key vocabularies. It defines terms in the namespace http://rs.tdwg.org/dwc/iri/ which are intended for use exclusively with non-literal objects.
   creator: Darwin Core Maintenance Group and RDF/OWL Task Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/rdf/index.md
   browserRedirectUri: https://dwc.tdwg.org/rdf/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0003-4365-3135
     contributor_literal: Steve Baskauf
@@ -895,7 +880,7 @@ documents:
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/xml/index.md
   browserRedirectUri: https://dwc.tdwg.org/xml/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0003-1144-0290
     contributor_literal: John Wieczorek
@@ -936,15 +921,12 @@ documents:
 # DARWIN CORE NAMESPACE
 - document: http://rs.tdwg.org/dwc/terms/namespace/
   documentTitle: Darwin Core namespace policy
-  abstract: All terms in the Darwin Core must be assigned a unique Uniform Resource Identifier (URI). For convenience,
-    the term URIs that are assigned and managed by the Darwin Core Task Group are grouped into collections known
-    as Darwin Core namespaces. This document describes how term URIs are allocated by the Darwin Core Maintenance
-    Group and the policies associated with Darwin Core namespaces.
+  abstract: All terms defined by Darwin Core must be assigned a unique Uniform Resource Identifier (URI). For convenience, the term URIs assigned and managed by Darwin Core are grouped into collections known as Darwin Core namespaces. Darwin Core also uses terms from namespaces maintained by other standards; those borrowed namespaces are not governed by this policy. This document describes how term URIs are allocated by the Darwin Core Maintenance Group and the policies associated with Darwin Core namespaces.
   creator: Darwin Core Maintenance Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/namespace/index.md
   browserRedirectUri: https://dwc.tdwg.org/namespace/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0003-1144-0290
     contributor_literal: John Wieczorek
@@ -990,7 +972,7 @@ documents:
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/simple/index.md
   browserRedirectUri: https://dwc.tdwg.org/simple/
-  modified: false
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0003-1144-0290
     contributor_literal: John Wieczorek
@@ -1031,16 +1013,12 @@ documents:
 # HIERARCHICAL EVENTS GUIDE
 - document: http://rs.tdwg.org/dwc/doc/hierarchy/
   documentTitle: Properties of hierarchical events in the Humboldt Extension for Ecological Inventories
-  abstract: Ecological inventories in the context of Darwin Core can be considered as types of dwc:Events with the
-    potential for hierarchical structure relating broader parent dwc:Events with narrower child dwc:Events. Terms
-    in the Humboldt Extension are all properties of a dwc:Event. This document explains how dwc:Event hierarchies
-    for ecological inventories should be structured and provides guidance on the use of Humboldt Extension terms
-    in the context of parent and child dwc:Events.
+  abstract: Ecological inventories in the context of Darwin Core can be considered as types of dwc:Events with the potential for hierarchical structure relating broader parent dwc:Events with narrower child dwc:Events. Terms in the Humboldt Extension are all properties of a dwc:Event. This document explains how dwc:Event hierarchies for ecological inventories should be structured and provides guidance on the use of Humboldt Extension terms in the context of parent and child dwc:Events.
   creator: TDWG Humboldt Extension Task Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/hierarchy/index.md
-  browserRedirectUri: https://eco.tdwg.org/hierarchy/
-  modified: false
+  browserRedirectUri: https://dwc.tdwg.org/hierarchy/
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0001-7087-2646
     contributor_literal: Yi-Ming Gan
@@ -1104,15 +1082,13 @@ documents:
     affiliation_uri: http://www.wikidata.org/entity/Q1531570
 # GUIDELINES FOR IS LEAST SPECIFIC TARGET CATEGORY INCLUSIVE
 - document: http://rs.tdwg.org/dwc/doc/inclusive/
-  documentTitle: Guidelines for isLeastSpecificTargetCategoryQuantityInclusive
-  abstract: The Humboldt Extension for ecological inventories mints the term eco:isLeastSpecificTargetCategoryQuantityInclusive
-    to describe how to treat counts of organisms when records from a single dwc:Event include multiple target categories.
-    This document describes how to use that term.
+  documentTitle: isLeastSpecificTargetCategoryQuantityInclusive Guidelines
+  abstract: The term eco:isLeastSpecificTargetCategoryQuantityInclusive describes how to treat quantities of organisms when records from an eco:Survey include multiple target categories. This document describes how to use that term.
   creator: TDWG Humboldt Extension Task Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/inclusive/index.md
-  browserRedirectUri: https://eco.tdwg.org/inclusive/
-  modified: false
+  browserRedirectUri: https://dwc.tdwg.org/inclusive/
+  modified: true
   contributors:
   - contributor_iri: https://orcid.org/0000-0001-7087-2646
     contributor_literal: Yi-Ming Gan
@@ -1359,6 +1335,6 @@ vocabularies:
     new_term_list: false
     utility_namespace: false
     termlist_uri: ''
-    prepend_url: https://eco.tdwg.org/tcr/#
+    prepend_url: https://dwc.tdwg.org/tcr/#
     use_namespace_in_fragment: true
     separator: _
