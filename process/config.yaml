@@ -1013,7 +1013,7 @@ documents:
 # HIERARCHICAL EVENTS GUIDE
 - document: http://rs.tdwg.org/dwc/doc/hierarchy/
   documentTitle: Properties of hierarchical events in the Humboldt Extension for Ecological Inventories
-  abstract: Ecological inventories in the context of Darwin Core can be considered as types of dwc:Events with the potential for hierarchical structure relating broader parent dwc:Events with narrower child dwc:Events. Terms in the Humboldt Extension are all properties of a dwc:Event. This document explains how dwc:Event hierarchies for ecological inventories should be structured and provides guidance on the use of Humboldt Extension terms in the context of parent and child dwc:Events.
+  abstract: Ecological inventories in the context of Darwin Core can be considered as types of dwc:Events with the potential for hierarchical structure relating broader parent dwc:Events with narrower child dwc:Events. Many terms originating in the Humboldt Extension are properties of eco:Survey; other terms describe resources related to surveys, such as eco:SurveyTarget. This document explains how dwc:Event hierarchies for ecological inventories should be structured and provides guidance on the use of Humboldt Extension terms in the context of parent and child dwc:Events.
   creator: TDWG Humboldt Extension Task Group
   mediaType: text/markdown
   accessUrl: https://raw.githubusercontent.com/tdwg/dwc/master/docs/hierarchy/index.md
