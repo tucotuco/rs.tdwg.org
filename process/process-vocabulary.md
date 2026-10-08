@@ -2,11 +2,11 @@
 
 **Title:** Processing vocabulary and document changes
 
-**Date Modified:** 2026-10-05
+**Date Modified:** 2026-10-08
 
 **Part of TDWG Standard:** Not part of any standard
 
-**Abstract:** This document describes the maintainer workflow for processing one complete TDWG standards release into the metadata maintained in `rs.tdwg.org`. The release processor reads a stable `config.yaml`, release-specific namespace CSV files, and Document configuration files; validates the release; stages all generated metadata changes transactionally; and publishes the resulting repository delta only after successful processing. This document provides a short release recipe followed by detailed explanations of each step and of the metadata resources affected by processing.
+**Abstract:** This document describes the maintainer workflow for processing one complete TDWG standards release into the metadata maintained in `rs.tdwg.org`. The release processor reads a stable `config.yaml` together with release-specific namespace CSV files; validates the complete Standard, Vocabulary, Term List, and Document declaration; stages all generated metadata changes transactionally; and publishes the resulting repository delta only after successful processing. This document provides a short release recipe followed by detailed explanations of each step and of the metadata resources affected by processing.
 
 **Contributors:** Steve Baskauf (TDWG Technical Architecture Group, TDWG Audiovisual Core Maintenance Group, TDWG Darwin Core Maintenance Group), John Wieczorek (TDWG Darwin Core Maintenance Group)
 
@@ -57,7 +57,7 @@ For each configured namespace, a CSV named from its configured namespace prefix 
 
 `config.yaml` is also the authoritative declaration of **current containment** for processing purposes. Its Vocabulary/namespace structure determines current Term List-to-Vocabulary ownership, and its `documents` list together with the configured Vocabularies determines the current direct composition of the Standard. Dated Vocabulary- and Standard-version membership tables remain historical snapshots and are not templates from which future membership is inferred.
 
-The processor also manages Document metadata. Vocabulary-associated Lists-of-Terms Documents are versioned when a member Term List changes or the Vocabulary's current Term List membership changes. Other configured Documents use `doc_modified` in their `document_configuration.yaml` as the explicit signal that the Document changed in the target release.
+The processor also manages Document metadata from the centralized release declaration in `config.yaml`. Vocabulary-associated Lists-of-Terms Documents are versioned when a member Term List changes or the Vocabulary's current Term List membership changes. Other configured Documents use `modified: true` in their release-level Document declaration as the explicit signal that the Document changed in the target release. Document identity, Standard containment, and lifecycle dates are derived by the processor rather than repeated as maintainer-supplied metadata.
 
 Term deprecations are not supported by the normal workflow described here. See [section 3.11](#311-legacy-notebooks-and-term-deprecations).
 
@@ -68,7 +68,7 @@ This section is the short recipe. Follow the links for the details and for expla
 1. **Create or select a working branch and prepare the release directory.** Start from the repository state that should precede the release. A pre-processing commit is RECOMMENDED as a useful checkpoint. See [3.1](#31-create-the-working-branch-and-release-directory).
 2. **Prepare one release-input CSV for every configured namespace.** Include only the new or modified terms; use a header-only file when there are no term changes in that namespace. See [3.2](#32-prepare-namespace-release-input-csv-files).
 3. **Update `process/config.yaml` for the complete Standard release.** Declare the complete current Vocabulary, namespace/Term List, and Document composition—not only resources that changed. See [3.3](#33-configure-the-complete-release-in-configyaml).
-4. **Update Document source metadata where necessary.** For a changed non-List-of-Terms Document, set its `doc_modified` to the release date. Update author configuration only when author/role metadata changes. See [3.4](#34-prepare-document-metadata).
+4. **Update the Document declarations in `config.yaml` where necessary.** For a changed non-List-of-Terms Document, set `modified: true` and update its declared metadata or contributors as needed. Do not set `modified` on Vocabulary-associated Lists-of-Terms Documents; their versioning is controlled by Vocabulary/Term List release state. See [3.4](#34-prepare-document-metadata).
 5. **Run `process.py` from the `process` directory.** Preflight validation and the complete release run occur in a staged temporary repository. Nothing is published to the working tree unless staged processing succeeds. See [3.5](#35-run-the-processor).
 6. **Inspect the generated release carefully.** Review console output, the generated release report, the processing log, `git diff --check`, `git status --short`, `git diff --stat`, and the substantive diff. See [3.6](#36-review-the-generated-release) and [section 4](#4-what-processpy-modifies).
 7. **If anything is wrong, correct the authoritative input and run `process.py` again on the same branch.** The processor is designed to converge on the state represented by the current inputs. An unchanged same-release rerun should produce no additional repository metadata changes. See [3.7](#37-correct-and-rerun).
@@ -122,7 +122,11 @@ At the release level it supplies, among other settings:
 
 Each Vocabulary configuration supplies its identity and metadata, the IRI of its human-readable List-of-Terms Document, its vocabulary type, and its complete list of participating namespaces/Term Lists. Each namespace configuration supplies the namespace identity, dataset names, Term List identity and metadata, redirect construction information, and flags such as `borrowed`, `utility_namespace`, and `new_term_list`.
 
-The `documents` array declares the current direct Document parts of the Standard. Each entry contains the permanent Document IRI. Do not limit this list to Documents changed in the release.
+The `documents` array declares the current direct Document parts of the Standard. Do not limit this list to Documents changed in the release. Each Document entry contains its permanent Document IRI and its contributor declaration, may supply Document metadata that override release-level `document_defaults`, and, for non-List-of-Terms Documents, may contain the Boolean release-control flag `modified`.
+
+`document_defaults` provides metadata shared across configured Documents. Supported Document metadata include the title, abstract, creator, media type, access URL, browser redirect URI, publisher, license statement, license URI, and comment. The processor rejects derived lifecycle or containment fields such as `current_iri`, `dcterms_isPartOf`, `doc_created`, `doc_modified`, and `citation` when they are supplied in a Document declaration because those values are derived from release state.
+
+Each configured Document must resolve, after `document_defaults` and per-Document overrides are combined, to the complete required Document metadata expected by the processor. Contributor declarations are also centralized in `config.yaml` and supply the contributor identity/literal, role, role URI, affiliation, and affiliation URI used to maintain current and versioned author/role metadata.
 
 A single processing run can contain multiple Vocabularies. Namespace prefixes and dataset names must be unambiguous across the complete release configuration.
 
@@ -137,30 +141,37 @@ See [4.3](#43-vocabularies-and-vocabulary-version-snapshots) and [4.4](#44-stand
 
 ## 3.4 Prepare Document metadata
 
-Document source metadata is stored under `process/document_metadata_processing/` in a directory derived from the permanent Document IRI. For example:
+Document metadata and contributors are declared centrally in the release-level `documents` array in `process/config.yaml`. Common metadata may be supplied once in `document_defaults` and overridden where necessary in an individual Document declaration.
 
-`http://rs.tdwg.org/dwc/doc/list/` → `dwc_doc_list`
+The permanent Document IRI is supplied by the `document` key. The processor derives rather than configures:
 
-The principal source files are:
+- `current_iri` from `document`;
+- `dcterms_isPartOf` from the configured Standard;
+- `doc_created` for a genuinely new Document from `date_issued`;
+- `doc_modified` for a new or changed Document from `date_issued`; and
+- the current citation from the resolved Document metadata and release date.
 
-- `document_configuration.yaml`, which contains Document metadata; and
-- `authors_configuration.yaml`, when author/contributor-role metadata is supplied or changed.
+Maintainers therefore MUST NOT supply those derived fields in a Document declaration.
 
 ### Vocabulary-associated Lists-of-Terms Documents
 
-The List-of-Terms Document identified by each Vocabulary's `list_of_terms_iri` is managed automatically as part of Vocabulary processing. The maintainer does not invoke the Document updater separately for it. A new List-of-Terms Document version is created when the Vocabulary release state requires the human-readable Document metadata to advance.
+The List-of-Terms Document identified by each Vocabulary's `list_of_terms_iri` is managed automatically as part of Vocabulary processing. Its Document declaration supplies the metadata and contributors used when a version is required, but it MUST NOT contain `modified`. A new List-of-Terms Document version is created when the associated Vocabulary release state requires the human-readable Document metadata to advance, for example because a member Term List changed or the Vocabulary's current Term List membership changed.
 
 ### Other configured Documents
 
-For Documents in `config.yaml` that are not Vocabulary-associated Lists of Terms, `doc_modified` in `document_configuration.yaml` is the explicit release-change signal:
+For Documents that are not Vocabulary-associated Lists of Terms:
 
-- if `doc_modified` is earlier than `date_issued`, the existing Document version is carried forward unchanged;
-- if `doc_modified` equals `date_issued`, the Document is processed and a target-date version is created unless that version already exists; and
-- if `doc_modified` is later than `date_issued`, processing fails because that future state cannot belong to the target release.
+- a Document absent from current Document metadata is treated as new and receives its first version in the target release;
+- an existing Document receives a new target-date version only when its declaration contains `modified: true`; and
+- an existing Document without `modified: true` retains its latest applicable version.
 
-A new configured Document must have an applicable `document_configuration.yaml` so that its first current and versioned metadata can be created.
+The processor derives the target lifecycle dates from `date_issued`; maintainers do not enter `doc_modified` as a release-control field.
 
-`general_configuration.yaml` is runtime input to the reusable Document updater. During `process.py`, it is populated for the Document being processed and restored afterward; maintainers do not edit it as part of the release workflow.
+A same-release rerun does not create a duplicate Document version when the target-date version already exists.
+
+### Delivery metadata
+
+Document delivery metadata are reconciled independently of semantic Document versioning. Changes to `browserRedirectUri`, `accessUrl`, or media type may update the current Document delivery metadata and the latest applicable version's delivery/format metadata without requiring `modified: true` or creating a new Document version. This allows a Document to move to a different hosting or source location without asserting that its semantic content changed.
 
 See [4.5](#45-document-metadata).
 
@@ -227,7 +238,7 @@ Section [4](#4-what-processpy-modifies) identifies the principal metadata tables
 
 ## 3.7 Correct and rerun
 
-If the generated result is wrong because the source CSVs, `config.yaml`, Document configuration, or persistent current-membership declarations are wrong, correct the authoritative input and run `process.py` again on the same working branch.
+If the generated result is wrong because the source CSVs, `config.yaml` release declaration, centralized Document metadata/contributors, or persistent current-membership declarations are wrong, correct the authoritative input and run `process.py` again on the same working branch.
 
 The processor is designed to be deterministic and same-release idempotent. In particular:
 
@@ -364,21 +375,31 @@ Standard current/version metadata and replacement relationships are maintained i
 
 ## 4.5 Document metadata
 
-Document metadata are maintained in the `docs/`, `docs-versions/`, and `docs-roles/` tables by the reusable Document updater invoked from `process.py`.
+Document metadata are maintained in the `docs/`, `docs-versions/`, and `docs-roles/` tables directly from the centralized release declaration in `config.yaml`.
+
+The processor distinguishes **Document identity and lifecycle state**, **semantic versioning**, and **delivery metadata**:
+
+- the permanent Document identity comes from the configured `document` IRI;
+- Standard containment is derived from the configured Standard;
+- creation and modification dates are derived from repository history and `date_issued`;
+- non-List-of-Terms Documents receive a new version only when they are new or explicitly declared `modified: true`;
+- Vocabulary-associated Lists-of-Terms Documents receive versions according to Vocabulary/Term List release state rather than a per-Document `modified` flag; and
+- delivery metadata such as redirect URI, access URL, and media type can be reconciled without creating a semantic Document version.
 
 For a changed existing Document, processing normally:
 
-- creates the target-date Document version;
-- updates current Document metadata where configured;
-- records target version authors/formats;
+- creates or reconciles the target-date Document version;
+- updates current Document metadata from the resolved release declaration;
+- records current and target-version contributor/author information;
+- records current and target-version format/access information;
 - archives the immediately preceding version's redirect/access information when necessary; and
 - records the target-version-to-predecessor replacement relationship.
 
-For a genuinely new Document, the current Document and its first version are created.
+For a genuinely new Document, the current Document and its first version are created. Its creation and modification dates are both the target release date.
 
-Unchanged non-List-of-Terms Documents are not reprocessed merely because they are listed as parts of the Standard. Their prior applicable versions are carried into the target Standard-version snapshot by reference.
+For an unchanged existing Document, no semantic version is created merely because the Document remains a declared part of the Standard. The latest applicable version is carried into the target Standard-version snapshot by reference. Delivery metadata may nevertheless be reconciled independently.
 
-The Document updater preserves stable row/scope ordering on same-release reruns so that a semantically unchanged rerun is also byte-stable.
+The Document updater preserves stable row/scope ordering and stable identities on same-release reruns so that a semantically unchanged rerun is also byte-stable.
 
 ## 4.6 Human-readable term redirects
 
@@ -414,7 +435,7 @@ A successful run writes:
 - `process/logs/process-YYYY-MM-DD.log`; and
 - `process/reports/release-report-YYYY-MM-DD.md`.
 
-These are generated in staging and published only after the metadata transaction succeeds. The log records namespace-level actions and created/modified files. The release report summarizes the resulting Standard, Vocabulary, and Term List release composition and is suitable as a review aid or starting point for a GitHub Release description.
+These are generated in staging and published only after the metadata transaction succeeds. The log records namespace-level actions and created/modified files. The release report summarizes the resulting configured Standard, its Vocabulary and Term List release composition, and release-input term-change counts. It is suitable as a review aid or starting point for a GitHub Release description.
 
 Neither replaces review of the authoritative repository diff.
 
@@ -422,7 +443,7 @@ Neither replaces review of the authoritative repository diff.
 
 `process.py` updates the authoritative metadata and the metadata record for a Vocabulary-associated List-of-Terms Document, but it does not build the human-readable List-of-Terms content itself. That build remains a Maintenance Group responsibility.
 
-The build process SHOULD use authoritative current metadata from `rs.tdwg.org` together with the applicable Document configuration so that human-readable and machine-readable representations remain consistent.
+The build process SHOULD use authoritative current metadata from `rs.tdwg.org` together with the applicable centrally declared Document metadata so that human-readable and machine-readable representations remain consistent.
 
 The Darwin Core and Audiovisual Core build systems have evolved substantially from the older example notebooks in this repository and support translation workflows. A Maintenance Group creating or modernizing a build system should therefore use a currently maintained standard build as its starting point rather than assume that historical `page_build_scripts` examples represent current best practice.
 

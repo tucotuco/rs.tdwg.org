@@ -375,6 +375,8 @@ if _missing_release_config_keys:
 date_issued = config['date_issued']
 local_offset_from_utc = config['local_offset_from_utc']
 standardUri = config['standard']
+standard_label = config.get('standard_label', standardUri)
+standard_description = config.get('standard_description', '')
 revision_directory = config['revision_directory']
 release_directory = config.get(
     'release_directory',
@@ -3940,7 +3942,7 @@ def _load_all_version_labels_and_replacements():
 
 
 def generate_release_report():
-    """Generate one release-level report spanning every configured Vocabulary."""
+    """Generate one Standard release report spanning every configured Vocabulary."""
     vocabulary_versions = readCsv('../vocabularies-versions/vocabularies-versions.csv')
     vocabulary_members = readCsv('../vocabularies-versions/vocabularies-versions-members.csv')
     term_list_versions = readCsv('../term-lists-versions/term-lists-versions.csv')
@@ -3967,15 +3969,17 @@ def generate_release_report():
         }
 
     report_lines = [
-        '# Darwin Core release ' + date_issued,
+        '# ' + standard_label + ' release ' + date_issued,
         '',
-        'This report summarizes this Darwin Core release at the Standard, Vocabulary, '
-        'Term List, and term change levels. It does not provide details of individual '
-        'term changes, which can be found in the GitHub milestone upon which the '
-        'public review was based.',
+        'This report summarizes the ' + standard_label +
+        ' release at the Standard, Vocabulary, Term List, and term change levels. '
+        'It reports release-processing results rather than the detailed rationale '
+        'or review history for individual term changes; consult the applicable '
+        'standard-specific review and decision materials for that information.',
         '',
         '## Release',
         '',
+        '- **Standard:** ' + standard_label + ' (`' + standardUri + '`)',
         '- **Standard version:** ' + (
             '`' + current_standard_version + '`' if standard_rows else 'No new Standard version'
         ),
@@ -4050,6 +4054,75 @@ def generate_release_report():
             )
         report_lines.append('')
 
+    # Summarize Documents that were added or changed in this release.  Derive
+    # release status from version history rather than from configuration flags so
+    # the same logic works for both Vocabulary-associated Lists-of-Terms Documents
+    # and other configured Documents.
+    document_versions = readCsv('../docs-versions/docs-versions.csv')
+    dv_version = _column_index(document_versions[0], 'version_iri')
+    dv_identity = _column_index(document_versions[0], 'current_iri')
+    dv_date = _column_index(document_versions[0], 'version_issued')
+    target_date = datetime.date.fromisoformat(date_issued)
+
+    document_changes = []
+    for document_config in documents:
+        document_iri = document_config['document']
+        declaration = _resolved_document_config(document_config)
+        document_title = declaration.get('documentTitle', '') or document_iri
+        target_version_iri = document_iri + date_issued
+
+        target_matches = [
+            row for row in document_versions[1:]
+            if row[dv_identity] == document_iri and
+               row[dv_version] == target_version_iri and
+               row[dv_date] == date_issued
+        ]
+        if len(target_matches) > 1:
+            raise ValueError(
+                'Release report found more than one target-date Document version for ' +
+                document_iri
+            )
+        if not target_matches:
+            continue
+
+        earlier_versions = []
+        for row in document_versions[1:]:
+            if row[dv_identity] != document_iri:
+                continue
+            issued = datetime.date.fromisoformat(row[dv_date])
+            if issued < target_date:
+                earlier_versions.append(row[dv_version])
+
+        status = 'Changed' if earlier_versions else 'Added'
+        document_changes.append({
+            'title': document_title,
+            'iri': document_iri,
+            'status': status,
+            'version': target_version_iri,
+        })
+
+    report_lines.append('## Document changes')
+    report_lines.append('')
+    added_count = sum(1 for item in document_changes if item['status'] == 'Added')
+    changed_count = sum(1 for item in document_changes if item['status'] == 'Changed')
+    report_lines.append('- **Documents added:** ' + str(added_count))
+    report_lines.append('- **Documents changed:** ' + str(changed_count))
+    report_lines.append('')
+
+    if document_changes:
+        report_lines.append('| Document | Status | Version |')
+        report_lines.append('| --- | --- | --- |')
+        for item in document_changes:
+            title = item['title'].replace('|', '\\|')
+            report_lines.append(
+                '| ' + title + ' (`' + item['iri'] + '`) | ' +
+                item['status'] + ' | `' + item['version'] + '` |'
+            )
+        report_lines.append('')
+    else:
+        report_lines.append('No Documents were added or changed in this release.')
+        report_lines.append('')
+
     report_lines.append('## Standard composition')
     report_lines.append('')
     report_lines.append(
@@ -4092,7 +4165,8 @@ os.makedirs('logs', exist_ok=True)
 log_filename = os.path.join('logs', 'process-' + date_issued + '.log')
 
 with open(log_filename, 'w', encoding='utf-8') as log_file:
-    log_file.write('Darwin Core vocabulary processing\n')
+    log_file.write(standard_label + ' release processing\n')
+    log_file.write('Standard: ' + standardUri + '\n')
     log_file.write('Release date: ' + date_issued + '\n')
     log_file.write('Started: ' + run_started.strftime('%Y-%m-%dT%H:%M:%S') + local_offset_from_utc + '\n')
     log_file.write('Completed: ' + run_completed.strftime('%Y-%m-%dT%H:%M:%S') + local_offset_from_utc + '\n')
